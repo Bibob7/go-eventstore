@@ -2,7 +2,7 @@ package mysql
 
 import (
 	"database/sql"
-	"eventstore"
+	"github.com/Bibob7/go-eventstore"
 	"io"
 )
 
@@ -14,11 +14,11 @@ type EventStoreBundle struct {
 }
 
 // NewEventStoreBundle creates a MySQL connection and initializes event store infrastructure.
-func NewEventStoreBundle(db *sql.DB, outboxTable string) (*EventStoreBundle, error) {
+func NewEventStoreBundle(db *sql.DB, cfg eventstore.Config) (*EventStoreBundle, error) {
 	return &EventStoreBundle{
 		DB:               db,
-		EventStore:       NewEventStore(db, outboxTable),
-		IncrementIDStore: NewEventIncrementIDStore(db),
+		EventStore:       NewEventStore(db, cfg.OutboxTableName),
+		IncrementIDStore: NewEventIncrementIDStore(db, cfg.IncrementIDTableName),
 	}, nil
 }
 

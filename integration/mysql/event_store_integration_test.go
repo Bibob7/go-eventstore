@@ -3,8 +3,8 @@ package mysql
 import (
 	"context"
 	"database/sql"
-	"eventstore"
-	"eventstore/filter"
+	"github.com/Bibob7/go-eventstore"
+	"github.com/Bibob7/go-eventstore/filter"
 	"fmt"
 	"os"
 	"testing"

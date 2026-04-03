@@ -3,7 +3,7 @@ package mysql
 import (
 	"context"
 	"database/sql/driver"
-	"eventstore"
+	"github.com/Bibob7/go-eventstore"
 	"regexp"
 	"testing"
 	"time"

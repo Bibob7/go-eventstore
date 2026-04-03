@@ -9,14 +9,23 @@ import (
 )
 
 const (
-	DefaultWaitTime  = 5 * time.Second
+	// DefaultWaitTime is the delay applied by a delayedRelay between batches
+	// when ErrEventNotReadyToProcess is returned.
+	DefaultWaitTime = 5 * time.Second
+	// DefaultBatchSize is the number of events fetched per relay run when no
+	// explicit batch size is configured via WithBatchSize.
 	DefaultBatchSize = 100
 )
 
 var (
+	// ErrEventNotReadyToProcess signals that an event cannot be handled yet.
+	// Handlers should return this error to indicate a temporary condition;
+	// the relay will pause before retrying rather than treating it as a hard failure.
 	ErrEventNotReadyToProcess = errors.New("event not ready to process")
 )
 
+// IdempotencyRegistry tracks event processing state to prevent duplicate handling.
+// Implementations must be safe for concurrent use.
 type IdempotencyRegistry interface {
 	// RegisterKey registers an entry for the given key and namespace with state "pending".
 	// It returns ErrAlreadyExist if the combination is already registered.
@@ -28,49 +37,74 @@ type IdempotencyRegistry interface {
 	MarkAsFailed(ctx context.Context, key, namespace string) error
 }
 
+// Handler processes a single StoredEvent. Register one or more handlers on a
+// Relay via RegisterHandler. All handlers are called for every event in order.
 type Handler interface {
-	// Handle processes of the given eventstore.
-	// It returns an error if the event cannot be processed.
-	// If the event is not ready to be processed, it should return ErrEventNotReadyToProcess.
+	// Handle processes the given event. Return ErrEventNotReadyToProcess to
+	// signal a temporary condition; return any other error to abort the batch.
 	Handle(ctx context.Context, event StoredEvent) error
-	// Name returns the unique name of the handler.
+	// Name returns a stable, unique identifier for this handler.
+	// It is used as part of the idempotency key when an IdempotencyRegistry is configured.
 	Name() string
 }
 
+// RelayOption is a functional option for configuring a PointerRelay.
 type RelayOption func(*pointerRelay)
 
+// WithBatchSize sets the maximum number of events fetched per relay run.
+// Defaults to DefaultBatchSize.
 func WithBatchSize(batchSize int) RelayOption {
 	return func(p *pointerRelay) {
 		p.batchSize = batchSize
 	}
 }
 
+// WithHandleDelay inserts a pause between processing individual events within a batch.
+// Useful for rate-limiting or giving downstream systems time to react.
 func WithHandleDelay(delay time.Duration) RelayOption {
 	return func(p *pointerRelay) {
 		p.handleDelay = delay
 	}
 }
 
+// WithBatchDelay sets a delay between relay runs when no events are ready.
+// When ErrEventNotReadyToProcess is returned, the relay waits this duration
+// before the next run. Defaults to DefaultWaitTime.
 func WithBatchDelay(d time.Duration) RelayOption {
 	return func(p *pointerRelay) {
 		p.batchDelay = d
 	}
 }
 
+// WithIdempotencyRegistry enables idempotent event processing. When set, each
+// handler call is guarded by the registry so that an event is never processed
+// twice by the same handler, even across process restarts.
 func WithIdempotencyRegistry(registry IdempotencyRegistry) RelayOption {
 	return func(p *pointerRelay) {
 		p.idempotencyRegistry = registry
 	}
 }
 
+// IncrementIDStore persists the last successfully processed IncrementID per relay.
+// It is used to resume event processing after a restart without re-processing events.
 type IncrementIDStore interface {
+	// SetIncrementID stores the last processed IncrementID for the given consumer.
 	SetIncrementID(ctx context.Context, consumerName string, incrementID int64) error
+	// GetIncrementID returns the last processed IncrementID for the given consumer,
+	// or 0 if no position has been recorded yet.
 	GetIncrementID(ctx context.Context, consumerName string) (int64, error)
 }
 
+// Relay fetches events from a PointerStore and dispatches them to registered handlers.
+// Use NewPointerRelay to create a Relay and call Run in a loop (e.g. via a ticker or worker pool).
 type Relay interface {
+	// Name returns the unique name of this relay, used as the consumer identifier.
 	Name() string
+	// RegisterHandler adds one or more handlers to the relay.
+	// Handlers are called in registration order for every event.
 	RegisterHandler(handler ...Handler) Relay
+	// Run fetches the next batch of events and dispatches them to all handlers.
+	// It returns nil when the batch is empty or fully processed.
 	Run(ctx context.Context) error
 }
 
@@ -85,6 +119,9 @@ type pointerRelay struct {
 	batchDelay          time.Duration
 }
 
+// NewPointerRelay creates a cursor-based Relay that reads from store and tracks
+// its position in incrementIDStore. The name must be unique across all relays
+// sharing the same IncrementIDStore.
 func NewPointerRelay(name string, store PointerStore, incrementIDStore IncrementIDStore, opts ...RelayOption) Relay {
 	p := &pointerRelay{
 		name:             name,

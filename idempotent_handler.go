@@ -8,6 +8,9 @@ import (
 )
 
 var (
+	// ErrAlreadyExist is returned by IdempotencyRegistry.RegisterKey when the
+	// event has already been successfully processed by the same handler.
+	// The relay treats this as a signal to skip the handler and advance the pointer.
 	ErrAlreadyExist = errors.New("eventID for handler already exists")
 )
 

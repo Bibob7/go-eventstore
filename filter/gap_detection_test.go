@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"eventstore"
+	"github.com/Bibob7/go-eventstore"
 
 	"github.com/gofrs/uuid/v5"
 	"github.com/stretchr/testify/assert"

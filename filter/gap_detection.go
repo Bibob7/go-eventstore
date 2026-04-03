@@ -2,7 +2,7 @@ package filter
 
 import (
 	"context"
-	"eventstore"
+	"github.com/Bibob7/go-eventstore"
 )
 
 type GapDetector interface {

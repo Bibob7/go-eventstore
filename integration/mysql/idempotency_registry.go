@@ -5,7 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"errors"
-	"eventstore"
+	"github.com/Bibob7/go-eventstore"
 	"fmt"
 	"log/slog"
 	"time"
