@@ -19,12 +19,12 @@ jobs:
           go-version-file: go.mod
 
       - name: golangci-lint (core module)
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
           version: v2.11.4
 
       - name: golangci-lint (integration/mysql)
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
           version: v2.11.4
           working-directory: integration/mysql
