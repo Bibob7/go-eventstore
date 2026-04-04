@@ -5,13 +5,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"github.com/Bibob7/go-eventstore"
-	"github.com/Bibob7/go-eventstore/filter"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
+	"github.com/Bibob7/go-eventstore"
+	"github.com/Bibob7/go-eventstore/filter"
 	"github.com/gofrs/uuid/v5"
 )
 
