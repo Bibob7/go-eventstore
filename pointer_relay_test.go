@@ -353,6 +353,138 @@ func TestPointerRelay_WithHandleDelay_ContextCancelledDuringDelay(t *testing.T) 
 	}
 }
 
+func TestPointerRelay_SetIncrementIDError(t *testing.T) {
+	id1, _ := uuid.NewV4()
+	store := &mockPointerStore{
+		events: []StoredEvent{
+			{ID: id1, EntityID: id1, IncrementID: 1, EventType: "test-event", OccurredAt: time.Now()},
+		},
+	}
+	inc := newMockIncrementIDStore()
+	inc.setErr = errors.New("set error")
+	h := &mockHandler{}
+	relay := NewPointerRelay("test-processor", store, inc)
+	relay.RegisterHandler(h)
+
+	err := relay.Run(context.Background())
+
+	if err == nil {
+		t.Fatal("expected error from SetIncrementID, got nil")
+	}
+}
+
+func TestPointerRelay_ErrEventNotReadyToProcess_DoesNotSaveProgress(t *testing.T) {
+	id1, _ := uuid.NewV4()
+	store := &mockPointerStore{
+		events: []StoredEvent{
+			{ID: id1, EntityID: id1, IncrementID: 1, EventType: "test-event", OccurredAt: time.Now()},
+		},
+	}
+	inc := newMockIncrementIDStore()
+	h := &mockHandler{err: ErrEventNotReadyToProcess}
+	relay := NewPointerRelay("test-processor", store, inc)
+	relay.RegisterHandler(h)
+
+	err := relay.Run(context.Background())
+
+	if !errors.Is(err, ErrEventNotReadyToProcess) {
+		t.Fatalf("expected ErrEventNotReadyToProcess, got %v", err)
+	}
+	lastID, _ := inc.GetIncrementID(context.Background(), "test-processor")
+	if lastID != 0 {
+		t.Errorf("expected no progress saved, got increment ID %d", lastID)
+	}
+}
+
+func TestPointerRelay_MultipleHandlers_AllCalled(t *testing.T) {
+	id1, _ := uuid.NewV4()
+	store := &mockPointerStore{
+		events: []StoredEvent{
+			{ID: id1, EntityID: id1, IncrementID: 1, EventType: "test-event", OccurredAt: time.Now()},
+		},
+	}
+	inc := newMockIncrementIDStore()
+	h1 := &mockHandler{}
+	h2 := &mockHandler{}
+	relay := NewPointerRelay("test-processor", store, inc)
+	relay.RegisterHandler(h1, h2)
+
+	if err := relay.Run(context.Background()); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(h1.handleEvents) != 1 {
+		t.Errorf("expected h1 to handle 1 event, got %d", len(h1.handleEvents))
+	}
+	if len(h2.handleEvents) != 1 {
+		t.Errorf("expected h2 to handle 1 event, got %d", len(h2.handleEvents))
+	}
+}
+
+func TestPointerRelay_MultipleHandlers_AbortsOnFirstError(t *testing.T) {
+	id1, _ := uuid.NewV4()
+	store := &mockPointerStore{
+		events: []StoredEvent{
+			{ID: id1, EntityID: id1, IncrementID: 1, EventType: "test-event", OccurredAt: time.Now()},
+		},
+	}
+	inc := newMockIncrementIDStore()
+	h1 := &mockHandler{err: errors.New("h1 error")}
+	h2 := &mockHandler{}
+	relay := NewPointerRelay("test-processor", store, inc)
+	relay.RegisterHandler(h1, h2)
+
+	err := relay.Run(context.Background())
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if h2.handleCalled {
+		t.Error("expected h2 not to be called after h1 error")
+	}
+}
+
+func TestPointerRelay_WithBatchDelay_DelaysAfterEveryRun(t *testing.T) {
+	store := &mockPointerStore{events: []StoredEvent{}}
+	inc := newMockIncrementIDStore()
+	delay := 40 * time.Millisecond
+	relay := NewPointerRelay("test-processor", store, inc, WithBatchDelay(delay))
+
+	start := time.Now()
+	if err := relay.Run(context.Background()); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	elapsed := time.Since(start)
+
+	if elapsed < delay {
+		t.Errorf("expected delay of at least %v after run, got %v", delay, elapsed)
+	}
+}
+
+func TestPointerRelay_WithConditionalBatchDelay_DelaysOnlyOnNotReady(t *testing.T) {
+	id1, _ := uuid.NewV4()
+	store := &mockPointerStore{
+		events: []StoredEvent{
+			{ID: id1, EntityID: id1, IncrementID: 1, EventType: "test-event", OccurredAt: time.Now()},
+		},
+	}
+	inc := newMockIncrementIDStore()
+	h := &mockHandler{err: ErrEventNotReadyToProcess}
+	delay := 40 * time.Millisecond
+	relay := NewPointerRelay("test-processor", store, inc, WithConditionalBatchDelay(delay))
+	relay.RegisterHandler(h)
+
+	start := time.Now()
+	err := relay.Run(context.Background())
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("expected nil (delay absorbed the error), got %v", err)
+	}
+	if elapsed < delay {
+		t.Errorf("expected delay of at least %v on ErrEventNotReadyToProcess, got %v", delay, elapsed)
+	}
+}
+
 func TestPointerRelay_WithHandleDelay_ZeroDelay_NoWait(t *testing.T) {
 	id1, _ := uuid.NewV4()
 	id2, _ := uuid.NewV4()
