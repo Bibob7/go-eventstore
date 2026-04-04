@@ -20,13 +20,3 @@ CREATE TABLE IF NOT EXISTS event_increment_id (
     increment_id  BIGINT       NOT NULL DEFAULT 0,
     PRIMARY KEY (consumer_name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
--- Idempotency registry: tracks event processing state to prevent duplicate handling.
--- The table name is configurable via Config.IdempotencyTableName.
-CREATE TABLE IF NOT EXISTS idempotency_registry (
-    idempotency_key BINARY(32)   NOT NULL,
-    state           VARCHAR(16)  NOT NULL COMMENT 'pending | success | failed',
-    created_at      DATETIME     NOT NULL,
-    updated_at      DATETIME     NOT NULL,
-    PRIMARY KEY (idempotency_key)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
