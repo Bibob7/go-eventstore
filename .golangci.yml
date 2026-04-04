@@ -13,9 +13,9 @@ linters:
     - misspell
     - gocritic
 
-linters-settings:
-  goimports:
-    local-prefixes: github.com/Bibob7/go-eventstore
+  settings:
+    goimports:
+      local-prefixes: github.com/Bibob7/go-eventstore
 
 issues:
   max-same-issues: 0
