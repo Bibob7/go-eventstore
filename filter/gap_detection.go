@@ -2,6 +2,7 @@ package filter
 
 import (
 	"context"
+
 	"github.com/Bibob7/go-eventstore"
 )
 

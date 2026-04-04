@@ -79,20 +79,6 @@ func (m *mockHandler) Handle(ctx context.Context, event StoredEvent) error {
 	return m.err
 }
 
-// mock relay for delayedRelay tests
-type mockRelay struct {
-	name       string
-	processErr error
-	handlers   []Handler
-}
-
-func (m *mockRelay) Name() string { return m.name }
-func (m *mockRelay) RegisterHandler(handler ...Handler) Relay {
-	m.handlers = append(m.handlers, handler...)
-	return m
-}
-func (m *mockRelay) Run(ctx context.Context) error { return m.processErr }
-
 func TestPointerRelay_Name(t *testing.T) {
 	relay := NewPointerRelay("test-processor", nil, nil, WithBatchSize(10))
 
@@ -394,4 +380,3 @@ func TestPointerRelay_WithHandleDelay_ZeroDelay_NoWait(t *testing.T) {
 		t.Errorf("expected 2 events handled, got %d", len(h.handleEvents))
 	}
 }
-
