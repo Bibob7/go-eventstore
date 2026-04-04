@@ -48,12 +48,10 @@ type Relay interface {
 }
 
 type pointerRelay struct {
+	relayBase
 	eventStore       PointerStore
 	incrementIDStore IncrementIDStore
-	handler          []Handler
-	name             string
 	batchSize        int
-	handleDelay      time.Duration
 }
 
 // NewPointerRelay creates a cursor-based Relay that reads from store and tracks
@@ -66,11 +64,10 @@ func NewPointerRelay(name string, store PointerStore, incrementIDStore Increment
 	}
 
 	p := &pointerRelay{
-		name:             name,
+		relayBase:        relayBase{name: name, handleDelay: cfg.handleDelay},
 		eventStore:       store,
 		incrementIDStore: incrementIDStore,
 		batchSize:        cfg.batchSize,
-		handleDelay:      cfg.handleDelay,
 	}
 
 	var relay Relay = p
@@ -112,8 +109,7 @@ func (p *pointerRelay) Run(ctx context.Context) error {
 	var newLastIncrementID int64
 	for _, storedEvent := range storedEvents {
 		for _, handler := range p.handler {
-			err = p.handleEvent(ctx, storedEvent, handler)
-			if err != nil {
+			if err = p.handleEvent(ctx, storedEvent, handler); err != nil {
 				return err
 			}
 		}
@@ -130,34 +126,6 @@ func (p *pointerRelay) Run(ctx context.Context) error {
 
 	if err := p.incrementIDStore.SetIncrementID(ctx, p.name, newLastIncrementID); err != nil {
 		return fmt.Errorf("failed to set new increment id: %w", err)
-	}
-	return nil
-}
-
-func (p *pointerRelay) waitHandleDelay(ctx context.Context) error {
-	if p.handleDelay <= 0 {
-		return nil
-	}
-	slog.Debug("Delaying next event relay", "name", p.name, "delay", p.handleDelay)
-	select {
-	case <-ctx.Done():
-		slog.Debug("Context done, stopping relay", "name", p.name)
-		return ctx.Err()
-	case <-time.After(p.handleDelay):
-		return nil
-	}
-}
-
-func (p *pointerRelay) handleEvent(ctx context.Context, storedEvent StoredEvent, handler Handler) error {
-	handlerName := fmt.Sprintf("%s_%s", p.name, handler.Name())
-
-	if err := handler.Handle(ctx, storedEvent); err != nil {
-		if errors.Is(err, ErrEventNotReadyToProcess) {
-			slog.Info("Event not ready to process, stopping", "handler_name", handlerName, "event_id", storedEvent.ID, "error", err)
-			return err
-		}
-		slog.Error("Error relaying event", "handler_name", handlerName, "event_id", storedEvent.ID, "error", err)
-		return err
 	}
 	return nil
 }

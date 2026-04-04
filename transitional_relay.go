@@ -2,18 +2,13 @@ package eventstore
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"log/slog"
-	"time"
 )
 
 type transitionalRelay struct {
-	store       CleanUpStore
-	handler     []Handler
-	name        string
-	batchSize   int
-	handleDelay time.Duration
+	relayBase
+	store     CleanUpStore
+	batchSize int
 }
 
 // NewTransitionalRelay creates a Relay that fetches events from store, dispatches them
@@ -26,10 +21,9 @@ func NewTransitionalRelay(name string, store CleanUpStore, opts ...RelayOption) 
 	}
 
 	t := &transitionalRelay{
-		name:        name,
-		store:       store,
-		batchSize:   cfg.batchSize,
-		handleDelay: cfg.handleDelay,
+		relayBase: relayBase{name: name, handleDelay: cfg.handleDelay},
+		store:     store,
+		batchSize: cfg.batchSize,
 	}
 
 	var relay Relay = t
@@ -76,33 +70,5 @@ func (t *transitionalRelay) Run(ctx context.Context) error {
 		}
 	}
 
-	return nil
-}
-
-func (t *transitionalRelay) waitHandleDelay(ctx context.Context) error {
-	if t.handleDelay <= 0 {
-		return nil
-	}
-	slog.Debug("Delaying next event relay", "name", t.name, "delay", t.handleDelay)
-	select {
-	case <-ctx.Done():
-		slog.Debug("Context done, stopping relay", "name", t.name)
-		return ctx.Err()
-	case <-time.After(t.handleDelay):
-		return nil
-	}
-}
-
-func (t *transitionalRelay) handleEvent(ctx context.Context, event StoredEvent, handler Handler) error {
-	handlerName := fmt.Sprintf("%s_%s", t.name, handler.Name())
-
-	if err := handler.Handle(ctx, event); err != nil {
-		if errors.Is(err, ErrEventNotReadyToProcess) {
-			slog.Info("Event not ready to process, stopping", "handler_name", handlerName, "event_id", event.ID, "error", err)
-			return err
-		}
-		slog.Error("Error relaying event", "handler_name", handlerName, "event_id", event.ID, "error", err)
-		return err
-	}
 	return nil
 }
