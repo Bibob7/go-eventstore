@@ -2,8 +2,9 @@ package mysql
 
 import (
 	"database/sql"
-	"github.com/Bibob7/go-eventstore"
 	"io"
+
+	"github.com/Bibob7/go-eventstore"
 )
 
 // EventStoreBundle groups a MySQL DB connection with its event store infrastructure.

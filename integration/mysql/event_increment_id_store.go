@@ -4,8 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"github.com/Bibob7/go-eventstore"
 	"fmt"
+
+	"github.com/Bibob7/go-eventstore"
 )
 
 type eventIncrementIDStore struct {

@@ -3,8 +3,6 @@ package mysql
 import (
 	"context"
 	"database/sql"
-	"github.com/Bibob7/go-eventstore"
-	"github.com/Bibob7/go-eventstore/filter"
 	"fmt"
 	"os"
 	"testing"
@@ -13,6 +11,9 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gofrs/uuid/v5"
 	"github.com/stretchr/testify/require"
+
+	"github.com/Bibob7/go-eventstore"
+	"github.com/Bibob7/go-eventstore/filter"
 )
 
 const outboxTable = "outbox"
@@ -119,7 +120,7 @@ func fetchIDs(events []eventstore.StoredEvent) []int64 {
 
 func TestEventStore_GapDetection_NoGaps(t *testing.T) {
 	db := openTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	ensureOutboxTable(t, db)
 
 	// Insert committed contiguous events: 1,2,3
@@ -138,7 +139,7 @@ func TestEventStore_GapDetection_NoGaps(t *testing.T) {
 
 func TestEventStore_GapDetection_GapWithUncommittedPresent(t *testing.T) {
 	db := openTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	ensureOutboxTable(t, db)
 
 	// Committed: 1,2,5
@@ -151,7 +152,7 @@ func TestEventStore_GapDetection_GapWithUncommittedPresent(t *testing.T) {
 	require.NoError(t, err)
 	insertEvent(t, tx, 3, "test")
 	// Note: we intentionally do not commit until after the fetch
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	store := NewEventStore(db, outboxTable)
 	ctx := context.Background()
@@ -165,7 +166,7 @@ func TestEventStore_GapDetection_GapWithUncommittedPresent(t *testing.T) {
 
 func TestEventStore_GapDetection_GapWithMultipleUncommittedPresent(t *testing.T) {
 	db := openTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	ensureOutboxTable(t, db)
 
 	// Committed: 1,2,5
@@ -183,7 +184,7 @@ func TestEventStore_GapDetection_GapWithMultipleUncommittedPresent(t *testing.T)
 	insertEvent(t, tx, 7, "test")
 	insertEvent(t, tx, 10, "test")
 	// Note: we intentionally do not commit until after the fetch
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	store := NewEventStore(db, outboxTable)
 	ctx := context.Background()
@@ -197,7 +198,7 @@ func TestEventStore_GapDetection_GapWithMultipleUncommittedPresent(t *testing.T)
 
 func TestEventStore_GapDetection_GapWithRepeatableAttempt(t *testing.T) {
 	db := openTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	ensureOutboxTable(t, db)
 
 	// Committed: 1,2,5
@@ -234,7 +235,7 @@ func TestEventStore_GapDetection_GapWithRepeatableAttempt(t *testing.T) {
 
 func TestEventStore_GapDetection_GapWithoutUncommittedPresent(t *testing.T) {
 	db := openTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	ensureOutboxTable(t, db)
 
 	// Committed: 1,2,5 (no uncommitted rows)
@@ -254,7 +255,7 @@ func TestEventStore_GapDetection_GapWithoutUncommittedPresent(t *testing.T) {
 
 func TestEventStore_GapDetection_HugeGapWithoutUncommittedPresent(t *testing.T) {
 	db := openTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	ensureOutboxTable(t, db)
 
 	// Committed: 1,2,5 (no uncommitted rows)
@@ -274,7 +275,7 @@ func TestEventStore_GapDetection_HugeGapWithoutUncommittedPresent(t *testing.T) 
 
 func TestEventStore_GapDetection_SinceLastIncrementID(t *testing.T) {
 	db := openTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	ensureOutboxTable(t, db)
 
 	// Committed: 3,4,6 (start since 2)
@@ -306,7 +307,7 @@ func (c *countingGapDetector) HasUncommittedID(ctx context.Context, low, high in
 // Test ensures that HasUncommittedID is called exactly once for a large gap.
 func TestEventStore_GapDetection_HasUncommittedCalledOnceForLargeGap(t *testing.T) {
 	db := openTestDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	ensureOutboxTable(t, db)
 
 	insertEvent(t, db, 1, "test")

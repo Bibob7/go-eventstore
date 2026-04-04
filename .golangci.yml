@@ -8,14 +8,17 @@ linters:
     - ineffassign
     - staticcheck
     - unused
-    - gofmt
-    - goimports
     - misspell
     - gocritic
 
-linters-settings:
-  goimports:
-    local-prefixes: github.com/Bibob7/go-eventstore
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/Bibob7/go-eventstore
 
 issues:
   max-same-issues: 0
