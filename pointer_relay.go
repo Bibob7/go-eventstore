@@ -53,12 +53,20 @@ func WithHandleDelay(delay time.Duration) RelayOption {
 	}
 }
 
-// WithBatchDelay sets a delay between relay runs when no events are ready.
-// When ErrEventNotReadyToProcess is returned, the relay waits this duration
-// before the next run. Defaults to DefaultWaitTime.
+// WithBatchDelay sets an unconditional delay between every relay run.
+// The relay waits this duration after each batch, regardless of the result.
 func WithBatchDelay(d time.Duration) RelayOption {
 	return func(p *pointerRelay) {
 		p.batchDelay = d
+	}
+}
+
+// WithConditionalBatchDelay sets a delay between relay runs when no events are ready.
+// When ErrEventNotReadyToProcess is returned, the relay waits this duration
+// before the next run. Defaults to DefaultWaitTime.
+func WithConditionalBatchDelay(d time.Duration) RelayOption {
+	return func(p *pointerRelay) {
+		p.conditionalBatchDelay = d
 	}
 }
 
@@ -86,13 +94,14 @@ type Relay interface {
 }
 
 type pointerRelay struct {
-	eventStore       PointerStore
-	incrementIDStore IncrementIDStore
-	handler          []Handler
-	name             string
-	batchSize        int
-	handleDelay      time.Duration
-	batchDelay       time.Duration
+	eventStore            PointerStore
+	incrementIDStore      IncrementIDStore
+	handler               []Handler
+	name                  string
+	batchSize             int
+	handleDelay           time.Duration
+	batchDelay            time.Duration
+	conditionalBatchDelay time.Duration
 }
 
 // NewPointerRelay creates a cursor-based Relay that reads from store and tracks
@@ -111,8 +120,12 @@ func NewPointerRelay(name string, store PointerStore, incrementIDStore Increment
 
 	var relay Relay = p
 
+	if p.conditionalBatchDelay > 0 {
+		relay = newDelayedRelay(relay, p.conditionalBatchDelay)
+	}
+
 	if p.batchDelay > 0 {
-		relay = newDelayedRelay(relay, p.batchDelay)
+		relay = newBatchDelayedRelay(relay, p.batchDelay)
 	}
 
 	return relay
@@ -234,6 +247,41 @@ func (r delayedRelay) Run(ctx context.Context) error {
 		case <-time.After(r.waitTime):
 			return nil
 		}
+	}
+	return err
+}
+
+// batchDelayedRelay is a wrapper around Relay that adds an unconditional delay
+// after every batch run, regardless of the result.
+type batchDelayedRelay struct {
+	relay      Relay
+	batchDelay time.Duration
+}
+
+func newBatchDelayedRelay(relay Relay, batchDelay time.Duration) Relay {
+	return &batchDelayedRelay{
+		relay:      relay,
+		batchDelay: batchDelay,
+	}
+}
+
+func (r batchDelayedRelay) Name() string {
+	return r.relay.Name()
+}
+
+func (r batchDelayedRelay) RegisterHandler(handler ...Handler) Relay {
+	r.relay.RegisterHandler(handler...)
+	return r
+}
+
+func (r batchDelayedRelay) Run(ctx context.Context) error {
+	err := r.relay.Run(ctx)
+	slog.Debug("Delaying next batch", "name", r.relay.Name(), "batch_delay", r.batchDelay)
+	select {
+	case <-ctx.Done():
+		slog.Debug("Context done, stopping batch delayed relay", "name", r.relay.Name())
+		return ctx.Err()
+	case <-time.After(r.batchDelay):
 	}
 	return err
 }
