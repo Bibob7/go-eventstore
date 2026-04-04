@@ -24,16 +24,6 @@ var (
 	ErrEventNotReadyToProcess = errors.New("event not ready to process")
 )
 
-// Handler processes a single StoredEvent. Register one or more handlers on a
-// Relay via RegisterHandler. All handlers are called for every event in order.
-type Handler interface {
-	// Handle processes of the given event. Return ErrEventNotReadyToProcess to
-	// signal a temporary condition; return any other error to abort the batch.
-	Handle(ctx context.Context, event StoredEvent) error
-	// Name returns a stable, unique identifier for this handler.
-	Name() string
-}
-
 // IncrementIDStore persists the last successfully processed IncrementID per relay.
 // It is used to resume event processing after a restart without re-processing events.
 type IncrementIDStore interface {
