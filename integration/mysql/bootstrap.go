@@ -2,7 +2,6 @@ package mysql
 
 import (
 	"database/sql"
-	"io"
 
 	"github.com/Bibob7/go-eventstore"
 )
@@ -22,6 +21,3 @@ func NewEventStoreBundle(db *sql.DB, cfg eventstore.Config) (*EventStoreBundle, 
 		IncrementIDStore: NewEventIncrementIDStore(db, cfg.IncrementIDTableName),
 	}, nil
 }
-
-// Closer returns the DB connection as an io.Closer for use with ClosableModule.Closables.
-func (b *EventStoreBundle) Closer() io.Closer { return b.DB }
