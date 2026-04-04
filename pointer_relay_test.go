@@ -79,27 +79,6 @@ func (m *mockHandler) Handle(ctx context.Context, event StoredEvent) error {
 	return m.err
 }
 
-// mock implementation of IdempotencyRegistry
-type mockIdempotencyRegistry struct {
-	registerErr    error
-	markSuccessErr error
-	markFailedErr  error
-	registerCount  int
-}
-
-func (m *mockIdempotencyRegistry) RegisterKey(_ context.Context, _, _ string) error {
-	m.registerCount++
-	return m.registerErr
-}
-
-func (m *mockIdempotencyRegistry) MarkAsSuccess(_ context.Context, _, _ string) error {
-	return m.markSuccessErr
-}
-
-func (m *mockIdempotencyRegistry) MarkAsFailed(_ context.Context, _, _ string) error {
-	return m.markFailedErr
-}
-
 // mock relay for delayedRelay tests
 type mockRelay struct {
 	name       string
@@ -261,22 +240,7 @@ func TestPointerRelay_ProcessEvents_BatchSize(t *testing.T) {
 	}
 }
 
-// ---- Additional tests for delayed relay and idempotency behaviors ----
-
-// testIdemRegistry is a minimal mock implementing IdempotencyRegistry
-// to validate AlreadyExist handling and mark success/failed flows.
-type testIdemRegistry struct {
-	registerErr   error
-	registerCount int
-}
-
-func (m *testIdemRegistry) RegisterKey(_ context.Context, _, _ string) error {
-	m.registerCount++
-	return m.registerErr
-}
-
-func (m *testIdemRegistry) MarkAsSuccess(_ context.Context, _, _ string) error { return nil }
-func (m *testIdemRegistry) MarkAsFailed(_ context.Context, _, _ string) error  { return nil }
+// ---- Additional tests for delayed relay behaviors ----
 
 // delayedRelayStub implements Relay and returns a preconfigured error from Run.
 type delayedRelayStub struct {
@@ -431,25 +395,3 @@ func TestPointerRelay_WithHandleDelay_ZeroDelay_NoWait(t *testing.T) {
 	}
 }
 
-func TestPointerRelay_Idempotency_AlreadyExist_SkipsHandlerAndAdvancesPointer(t *testing.T) {
-	id1, _ := uuid.NewV4()
-	store := &mockPointerStore{events: []StoredEvent{{ID: id1, EntityID: id1, IncrementID: 1, EventType: "test-event", OccurredAt: time.Now()}}}
-	inc := newMockIncrementIDStore()
-	h := &mockHandler{}
-	reg := &testIdemRegistry{registerErr: ErrAlreadyExist}
-	p := NewPointerRelay("test-processor", store, inc, WithBatchSize(10), WithIdempotencyRegistry(reg))
-	p.RegisterHandler(h)
-	if err := p.Run(context.Background()); err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if h.handleCalled {
-		t.Fatalf("handler should not have been called when idempotency indicates already processed")
-	}
-	lastID, _ := inc.GetIncrementID(context.Background(), "test-processor")
-	if lastID != 1 {
-		t.Fatalf("expected last increment id to advance to 1, got %d", lastID)
-	}
-	if reg.registerCount != 1 {
-		t.Fatalf("expected 1 idempotency registration, got %d", reg.registerCount)
-	}
-}

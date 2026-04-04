@@ -8,6 +8,4 @@ type Config struct {
 	OutboxTableName string `mapstructure:"outboxTableName"`
 	// IncrementIDTableName is the name of the table used to persist relay consumer positions.
 	IncrementIDTableName string `mapstructure:"incrementIDTableName"`
-	// IdempotencyTableName is the name of the table used to track event processing state.
-	IdempotencyTableName string `mapstructure:"idempotencyTableName"`
 }

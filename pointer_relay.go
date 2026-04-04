@@ -24,27 +24,13 @@ var (
 	ErrEventNotReadyToProcess = errors.New("event not ready to process")
 )
 
-// IdempotencyRegistry tracks event processing state to prevent duplicate handling.
-// Implementations must be safe for concurrent use.
-type IdempotencyRegistry interface {
-	// RegisterKey registers an entry for the given key and namespace with state "pending".
-	// It returns ErrAlreadyExist if the combination is already registered.
-	RegisterKey(ctx context.Context, key, namespace string) error
-	// MarkAsSuccess marks an entry as "success".
-	MarkAsSuccess(ctx context.Context, key, namespace string) error
-	// MarkAsFailed marks an entry as "failed".
-	// In case of state failed, the event can be retried.
-	MarkAsFailed(ctx context.Context, key, namespace string) error
-}
-
 // Handler processes a single StoredEvent. Register one or more handlers on a
 // Relay via RegisterHandler. All handlers are called for every event in order.
 type Handler interface {
-	// Handle processes the given event. Return ErrEventNotReadyToProcess to
+	// Handle processes of the given event. Return ErrEventNotReadyToProcess to
 	// signal a temporary condition; return any other error to abort the batch.
 	Handle(ctx context.Context, event StoredEvent) error
 	// Name returns a stable, unique identifier for this handler.
-	// It is used as part of the idempotency key when an IdempotencyRegistry is configured.
 	Name() string
 }
 
@@ -76,15 +62,6 @@ func WithBatchDelay(d time.Duration) RelayOption {
 	}
 }
 
-// WithIdempotencyRegistry enables idempotent event processing. When set, each
-// handler call is guarded by the registry so that an event is never processed
-// twice by the same handler, even across process restarts.
-func WithIdempotencyRegistry(registry IdempotencyRegistry) RelayOption {
-	return func(p *pointerRelay) {
-		p.idempotencyRegistry = registry
-	}
-}
-
 // IncrementIDStore persists the last successfully processed IncrementID per relay.
 // It is used to resume event processing after a restart without re-processing events.
 type IncrementIDStore interface {
@@ -109,14 +86,13 @@ type Relay interface {
 }
 
 type pointerRelay struct {
-	eventStore          PointerStore
-	incrementIDStore    IncrementIDStore
-	idempotencyRegistry IdempotencyRegistry
-	handler             []Handler
-	name                string
-	batchSize           int
-	handleDelay         time.Duration
-	batchDelay          time.Duration
+	eventStore       PointerStore
+	incrementIDStore IncrementIDStore
+	handler          []Handler
+	name             string
+	batchSize        int
+	handleDelay      time.Duration
+	batchDelay       time.Duration
 }
 
 // NewPointerRelay creates a cursor-based Relay that reads from store and tracks
@@ -147,12 +123,7 @@ func (p *pointerRelay) Name() string {
 }
 
 func (p *pointerRelay) RegisterHandler(handler ...Handler) Relay {
-	for _, h := range handler {
-		if p.idempotencyRegistry != nil {
-			h = newIdempotentHandler(h, p.idempotencyRegistry, p.name)
-		}
-		p.handler = append(p.handler, h)
-	}
+	p.handler = append(p.handler, handler...)
 	return p
 }
 
