@@ -7,80 +7,171 @@ import (
 	"time"
 )
 
-func TestBatchDelayedRelay_Name(t *testing.T) {
-	stub := &delayedRelayStub{name: "my-relay"}
-	r := newBatchDelayedRelay(stub, 10*time.Millisecond)
-	if r.Name() != "my-relay" {
-		t.Fatalf("expected name %q, got %q", "my-relay", r.Name())
-	}
-}
-
-func TestBatchDelayedRelay_DelaysAfterSuccess(t *testing.T) {
-	delay := 40 * time.Millisecond
-	r := newBatchDelayedRelay(&delayedRelayStub{name: "r", processErr: nil}, delay)
-	start := time.Now()
-	err := r.Run(context.Background())
-	elapsed := time.Since(start)
-	if err != nil {
-		t.Fatalf("expected nil error, got %v", err)
-	}
-	if elapsed < delay {
-		t.Fatalf("expected delay of at least %v, got %v", delay, elapsed)
-	}
-}
-
-func TestBatchDelayedRelay_DelaysAfterError(t *testing.T) {
-	delay := 40 * time.Millisecond
-	expected := errors.New("some error")
-	r := newBatchDelayedRelay(&delayedRelayStub{name: "r", processErr: expected}, delay)
-	start := time.Now()
-	err := r.Run(context.Background())
-	elapsed := time.Since(start)
-	if !errors.Is(err, expected) {
-		t.Fatalf("expected error to propagate, got %v", err)
-	}
-	if elapsed < delay {
-		t.Fatalf("expected delay even on error, got %v", elapsed)
-	}
-}
-
-func TestBatchDelayedRelay_ContextCancelDuringDelay(t *testing.T) {
-	delay := 200 * time.Millisecond
-	r := newBatchDelayedRelay(&delayedRelayStub{name: "r", processErr: nil}, delay)
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(30 * time.Millisecond)
-		cancel()
-	}()
-	start := time.Now()
-	err := r.Run(ctx)
-	elapsed := time.Since(start)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected context.Canceled, got %v", err)
-	}
-	if elapsed >= delay {
-		t.Fatalf("expected early return due to context cancel, elapsed=%v", elapsed)
-	}
-}
-
 func TestDelayedRelay_Name(t *testing.T) {
-	stub := &delayedRelayStub{name: "my-relay"}
-	r := newDelayedRelay(stub, 10*time.Millisecond)
-	if r.Name() != "my-relay" {
-		t.Fatalf("expected name %q, got %q", "my-relay", r.Name())
+	tests := []struct {
+		name      string
+		relayName string
+	}{
+		{name: "delegates to inner relay", relayName: "my-relay"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newDelayedRelay(&delayedRelayStub{name: tc.relayName}, 10*time.Millisecond)
+			if r.Name() != tc.relayName {
+				t.Fatalf("expected %q, got %q", tc.relayName, r.Name())
+			}
+		})
 	}
 }
 
-func TestDelayedRelay_NoDelayOnSuccess(t *testing.T) {
-	delay := 100 * time.Millisecond
-	r := newDelayedRelay(&delayedRelayStub{name: "r", processErr: nil}, delay)
-	start := time.Now()
-	err := r.Run(context.Background())
-	elapsed := time.Since(start)
-	if err != nil {
-		t.Fatalf("expected nil error, got %v", err)
+func TestDelayedRelay_Run(t *testing.T) {
+	delay := 40 * time.Millisecond
+	otherErr := errors.New("other error")
+
+	tests := []struct {
+		name        string
+		processErr  error
+		cancelAfter time.Duration
+		wantErr     error
+		wantDelayed bool
+	}{
+		{
+			name:        "no delay on success",
+			processErr:  nil,
+			wantDelayed: false,
+		},
+		{
+			name:        "delays on ErrEventNotReadyToProcess",
+			processErr:  ErrEventNotReadyToProcess,
+			wantErr:     nil,
+			wantDelayed: true,
+		},
+		{
+			name:        "propagates other errors without delay",
+			processErr:  otherErr,
+			wantErr:     otherErr,
+			wantDelayed: false,
+		},
+		{
+			name:        "context cancel during wait",
+			processErr:  ErrEventNotReadyToProcess,
+			cancelAfter: 30 * time.Millisecond,
+			wantErr:     context.Canceled,
+			wantDelayed: false,
+		},
 	}
-	if elapsed >= delay {
-		t.Fatalf("expected no delay on success, got %v", elapsed)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newDelayedRelay(&delayedRelayStub{name: "r", processErr: tc.processErr}, delay)
+
+			ctx := context.Background()
+			if tc.cancelAfter > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				go func() {
+					time.Sleep(tc.cancelAfter)
+					cancel()
+				}()
+			}
+
+			start := time.Now()
+			err := r.Run(ctx)
+			elapsed := time.Since(start)
+
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("expected error %v, got %v", tc.wantErr, err)
+			}
+			if tc.wantErr == nil && err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+			if tc.wantDelayed && elapsed < delay {
+				t.Errorf("expected delay of at least %v, got %v", delay, elapsed)
+			}
+			if !tc.wantDelayed && elapsed >= delay {
+				t.Errorf("expected no delay, got %v", elapsed)
+			}
+		})
+	}
+}
+
+func TestBatchDelayedRelay_Name(t *testing.T) {
+	tests := []struct {
+		name      string
+		relayName string
+	}{
+		{name: "delegates to inner relay", relayName: "my-relay"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newBatchDelayedRelay(&delayedRelayStub{name: tc.relayName}, 10*time.Millisecond)
+			if r.Name() != tc.relayName {
+				t.Fatalf("expected %q, got %q", tc.relayName, r.Name())
+			}
+		})
+	}
+}
+
+func TestBatchDelayedRelay_Run(t *testing.T) {
+	delay := 40 * time.Millisecond
+	someErr := errors.New("some error")
+
+	tests := []struct {
+		name        string
+		processErr  error
+		cancelAfter time.Duration
+		wantErr     error
+	}{
+		{
+			name:       "delays after success",
+			processErr: nil,
+			wantErr:    nil,
+		},
+		{
+			name:       "delays after error",
+			processErr: someErr,
+			wantErr:    someErr,
+		},
+		{
+			name:        "context cancel during delay",
+			processErr:  nil,
+			cancelAfter: 30 * time.Millisecond,
+			wantErr:     context.Canceled,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newBatchDelayedRelay(&delayedRelayStub{name: "r", processErr: tc.processErr}, delay)
+
+			ctx := context.Background()
+			if tc.cancelAfter > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				go func() {
+					time.Sleep(tc.cancelAfter)
+					cancel()
+				}()
+			}
+
+			start := time.Now()
+			err := r.Run(ctx)
+			elapsed := time.Since(start)
+
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("expected error %v, got %v", tc.wantErr, err)
+			}
+			if tc.wantErr == nil && err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+
+			if tc.cancelAfter > 0 {
+				if elapsed >= delay {
+					t.Errorf("expected early return due to context cancel, elapsed=%v", elapsed)
+				}
+			} else {
+				if elapsed < delay {
+					t.Errorf("expected delay of at least %v, got %v", delay, elapsed)
+				}
+			}
+		})
 	}
 }

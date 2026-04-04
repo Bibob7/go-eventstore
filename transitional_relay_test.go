@@ -10,10 +10,10 @@ import (
 )
 
 type mockCleanUpStore struct {
-	events       []StoredEvent
-	fetchErr     error
-	cleanUpErr   error
-	cleanedUp    []StoredEvent
+	events     []StoredEvent
+	fetchErr   error
+	cleanUpErr error
+	cleanedUp  []StoredEvent
 }
 
 func (m *mockCleanUpStore) Append(_ context.Context, _ ...DomainEvent) error { return nil }
@@ -42,49 +42,116 @@ func newStoredEvent(incrementID int64) StoredEvent {
 }
 
 func TestTransitionalRelay_Name(t *testing.T) {
-	relay := NewTransitionalRelay("my-relay", &mockCleanUpStore{})
-	if relay.Name() != "my-relay" {
-		t.Fatalf("expected name %q, got %q", "my-relay", relay.Name())
+	tests := []struct {
+		name      string
+		relayName string
+	}{
+		{name: "returns configured name", relayName: "my-relay"},
+		{name: "returns empty name", relayName: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			relay := NewTransitionalRelay(tc.relayName, &mockCleanUpStore{})
+			if relay.Name() != tc.relayName {
+				t.Fatalf("expected name %q, got %q", tc.relayName, relay.Name())
+			}
+		})
 	}
 }
 
-func TestTransitionalRelay_NoEvents(t *testing.T) {
-	store := &mockCleanUpStore{}
-	relay := NewTransitionalRelay("r", store)
+func TestTransitionalRelay_Run(t *testing.T) {
+	tests := []struct {
+		name          string
+		events        []StoredEvent
+		fetchErr      error
+		cleanUpErr    error
+		handlerErr    error
+		opts          []RelayOption
+		wantErr       bool
+		wantHandled   int
+		wantCleanedUp int
+	}{
+		{
+			name:          "no events",
+			wantHandled:   0,
+			wantCleanedUp: 0,
+		},
+		{
+			name:          "handles and cleans up all events",
+			events:        []StoredEvent{newStoredEvent(1), newStoredEvent(2), newStoredEvent(3)},
+			wantHandled:   3,
+			wantCleanedUp: 3,
+		},
+		{
+			name:          "respects batch size",
+			events:        []StoredEvent{newStoredEvent(1), newStoredEvent(2), newStoredEvent(3)},
+			opts:          []RelayOption{WithBatchSize(2)},
+			wantHandled:   2,
+			wantCleanedUp: 2,
+		},
+		{
+			name:          "fetch error propagates",
+			fetchErr:      errors.New("fetch error"),
+			wantErr:       true,
+			wantHandled:   0,
+			wantCleanedUp: 0,
+		},
+		{
+			name:          "handler error prevents clean up",
+			events:        []StoredEvent{newStoredEvent(1)},
+			handlerErr:    errors.New("handler error"),
+			wantErr:       true,
+			wantHandled:   1,
+			wantCleanedUp: 0,
+		},
+		{
+			name:          "ErrEventNotReadyToProcess prevents clean up",
+			events:        []StoredEvent{newStoredEvent(1)},
+			handlerErr:    ErrEventNotReadyToProcess,
+			wantErr:       true,
+			wantHandled:   1,
+			wantCleanedUp: 0,
+		},
+		{
+			name:          "clean up error propagates",
+			events:        []StoredEvent{newStoredEvent(1)},
+			cleanUpErr:    errors.New("cleanup error"),
+			wantErr:       true,
+			wantHandled:   1,
+			wantCleanedUp: 0,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &mockCleanUpStore{
+				events:     tc.events,
+				fetchErr:   tc.fetchErr,
+				cleanUpErr: tc.cleanUpErr,
+			}
+			h := &mockHandler{err: tc.handlerErr}
+			relay := NewTransitionalRelay("r", store, tc.opts...)
+			relay.RegisterHandler(h)
 
-	if err := relay.Run(context.Background()); err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if len(store.cleanedUp) != 0 {
-		t.Errorf("expected no clean ups, got %d", len(store.cleanedUp))
-	}
-}
+			err := relay.Run(context.Background())
 
-func TestTransitionalRelay_HandlesAndCleansUpAllEvents(t *testing.T) {
-	store := &mockCleanUpStore{
-		events: []StoredEvent{newStoredEvent(1), newStoredEvent(2), newStoredEvent(3)},
-	}
-	h := &mockHandler{}
-	relay := NewTransitionalRelay("r", store)
-	relay.RegisterHandler(h)
-
-	if err := relay.Run(context.Background()); err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if len(h.handleEvents) != 3 {
-		t.Errorf("expected 3 handled events, got %d", len(h.handleEvents))
-	}
-	if len(store.cleanedUp) != 3 {
-		t.Errorf("expected 3 cleaned-up events, got %d", len(store.cleanedUp))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("wantErr=%v, got %v", tc.wantErr, err)
+			}
+			if len(h.handleEvents) != tc.wantHandled {
+				t.Errorf("expected %d handled events, got %d", tc.wantHandled, len(h.handleEvents))
+			}
+			if len(store.cleanedUp) != tc.wantCleanedUp {
+				t.Errorf("expected %d cleaned-up events, got %d", tc.wantCleanedUp, len(store.cleanedUp))
+			}
+		})
 	}
 }
 
 func TestTransitionalRelay_CleansUpEachEventIndividually(t *testing.T) {
 	events := []StoredEvent{newStoredEvent(1), newStoredEvent(2)}
 	store := &mockCleanUpStore{events: events}
-	h := &mockHandler{}
 	relay := NewTransitionalRelay("r", store)
-	relay.RegisterHandler(h)
+	relay.RegisterHandler(&mockHandler{})
 
 	if err := relay.Run(context.Background()); err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -92,126 +159,51 @@ func TestTransitionalRelay_CleansUpEachEventIndividually(t *testing.T) {
 	if len(store.cleanedUp) != 2 {
 		t.Fatalf("expected 2 individual clean ups, got %d", len(store.cleanedUp))
 	}
-	if store.cleanedUp[0].ID != events[0].ID {
-		t.Errorf("first cleaned-up event mismatch")
-	}
-	if store.cleanedUp[1].ID != events[1].ID {
-		t.Errorf("second cleaned-up event mismatch")
+	if store.cleanedUp[0].ID != events[0].ID || store.cleanedUp[1].ID != events[1].ID {
+		t.Error("clean-up order does not match event order")
 	}
 }
 
-func TestTransitionalRelay_HandlerError_NoCleanUp(t *testing.T) {
-	store := &mockCleanUpStore{
-		events: []StoredEvent{newStoredEvent(1)},
+func TestTransitionalRelay_MultipleHandlers(t *testing.T) {
+	tests := []struct {
+		name          string
+		h1Err         error
+		wantH2Called  bool
+		wantCleanedUp int
+		wantErr       bool
+	}{
+		{
+			name:          "all handlers called on success",
+			wantH2Called:  true,
+			wantCleanedUp: 1,
+		},
+		{
+			name:          "aborts after first handler error",
+			h1Err:         errors.New("h1 error"),
+			wantH2Called:  false,
+			wantCleanedUp: 0,
+			wantErr:       true,
+		},
 	}
-	h := &mockHandler{err: errors.New("handler error")}
-	relay := NewTransitionalRelay("r", store)
-	relay.RegisterHandler(h)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &mockCleanUpStore{events: []StoredEvent{newStoredEvent(1)}}
+			h1 := &mockHandler{err: tc.h1Err}
+			h2 := &mockHandler{}
+			relay := NewTransitionalRelay("r", store)
+			relay.RegisterHandler(h1, h2)
 
-	err := relay.Run(context.Background())
+			err := relay.Run(context.Background())
 
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if len(store.cleanedUp) != 0 {
-		t.Errorf("expected no clean up after handler error, got %d", len(store.cleanedUp))
-	}
-}
-
-func TestTransitionalRelay_ErrEventNotReadyToProcess_NoCleanUp(t *testing.T) {
-	store := &mockCleanUpStore{
-		events: []StoredEvent{newStoredEvent(1)},
-	}
-	h := &mockHandler{err: ErrEventNotReadyToProcess}
-	relay := NewTransitionalRelay("r", store)
-	relay.RegisterHandler(h)
-
-	err := relay.Run(context.Background())
-
-	if !errors.Is(err, ErrEventNotReadyToProcess) {
-		t.Fatalf("expected ErrEventNotReadyToProcess, got %v", err)
-	}
-	if len(store.cleanedUp) != 0 {
-		t.Errorf("expected no clean up, got %d", len(store.cleanedUp))
-	}
-}
-
-func TestTransitionalRelay_FetchError(t *testing.T) {
-	store := &mockCleanUpStore{fetchErr: errors.New("fetch error")}
-	relay := NewTransitionalRelay("r", store)
-
-	if err := relay.Run(context.Background()); err == nil {
-		t.Fatal("expected error, got nil")
-	}
-}
-
-func TestTransitionalRelay_CleanUpError(t *testing.T) {
-	store := &mockCleanUpStore{
-		events:     []StoredEvent{newStoredEvent(1)},
-		cleanUpErr: errors.New("cleanup error"),
-	}
-	h := &mockHandler{}
-	relay := NewTransitionalRelay("r", store)
-	relay.RegisterHandler(h)
-
-	err := relay.Run(context.Background())
-
-	if err == nil {
-		t.Fatal("expected error from CleanUpEvents, got nil")
-	}
-}
-
-func TestTransitionalRelay_BatchSize(t *testing.T) {
-	store := &mockCleanUpStore{
-		events: []StoredEvent{newStoredEvent(1), newStoredEvent(2), newStoredEvent(3)},
-	}
-	h := &mockHandler{}
-	relay := NewTransitionalRelay("r", store, WithBatchSize(2))
-	relay.RegisterHandler(h)
-
-	if err := relay.Run(context.Background()); err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if len(h.handleEvents) != 2 {
-		t.Errorf("expected 2 events due to batch size, got %d", len(h.handleEvents))
-	}
-	if len(store.cleanedUp) != 2 {
-		t.Errorf("expected 2 clean ups, got %d", len(store.cleanedUp))
-	}
-}
-
-func TestTransitionalRelay_MultipleHandlers_AllCalled(t *testing.T) {
-	store := &mockCleanUpStore{events: []StoredEvent{newStoredEvent(1)}}
-	h1 := &mockHandler{}
-	h2 := &mockHandler{}
-	relay := NewTransitionalRelay("r", store)
-	relay.RegisterHandler(h1, h2)
-
-	if err := relay.Run(context.Background()); err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if len(h1.handleEvents) != 1 {
-		t.Errorf("expected h1 to handle 1 event, got %d", len(h1.handleEvents))
-	}
-	if len(h2.handleEvents) != 1 {
-		t.Errorf("expected h2 to handle 1 event, got %d", len(h2.handleEvents))
-	}
-}
-
-func TestTransitionalRelay_MultipleHandlers_AbortsOnFirstError(t *testing.T) {
-	store := &mockCleanUpStore{events: []StoredEvent{newStoredEvent(1)}}
-	h1 := &mockHandler{err: errors.New("h1 error")}
-	h2 := &mockHandler{}
-	relay := NewTransitionalRelay("r", store)
-	relay.RegisterHandler(h1, h2)
-
-	if err := relay.Run(context.Background()); err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if h2.handleCalled {
-		t.Error("expected h2 not to be called after h1 error")
-	}
-	if len(store.cleanedUp) != 0 {
-		t.Errorf("expected no clean up after handler error, got %d", len(store.cleanedUp))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("wantErr=%v, got %v", tc.wantErr, err)
+			}
+			if h2.handleCalled != tc.wantH2Called {
+				t.Errorf("h2 called=%v, want %v", h2.handleCalled, tc.wantH2Called)
+			}
+			if len(store.cleanedUp) != tc.wantCleanedUp {
+				t.Errorf("expected %d clean ups, got %d", tc.wantCleanedUp, len(store.cleanedUp))
+			}
+		})
 	}
 }
