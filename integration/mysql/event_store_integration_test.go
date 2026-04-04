@@ -118,179 +118,118 @@ func fetchIDs(events []eventstore.StoredEvent) []int64 {
 	return ids
 }
 
-func TestEventStore_GapDetection_NoGaps(t *testing.T) {
-	db := openTestDB(t)
-	defer func() { _ = db.Close() }()
-	ensureOutboxTable(t, db)
+func TestEventStore_FetchBatchOfEventsSince(t *testing.T) {
+	tests := []struct {
+		name        string
+		committed   []int64 // IDs inserted as committed events
+		uncommitted []int64 // IDs inserted inside an open (never-committed) transaction
+		since       int64
+		limit       int
+		wantIDs     []int64
+	}{
+		{
+			name:      "no gaps returns all events",
+			committed: []int64{1, 2, 3},
+			since:     -1,
+			limit:     10,
+			wantIDs:   []int64{1, 2, 3},
+		},
+		{
+			name:        "gap with one uncommitted row stops before gap",
+			committed:   []int64{1, 2, 5},
+			uncommitted: []int64{3},
+			since:       0,
+			limit:       10,
+			wantIDs:     []int64{1, 2},
+		},
+		{
+			name:        "gap with multiple uncommitted rows stops before gap",
+			committed:   []int64{1, 2, 12},
+			uncommitted: []int64{3, 4, 5, 6, 7, 10},
+			since:       0,
+			limit:       10,
+			wantIDs:     []int64{1, 2},
+		},
+		{
+			name:      "gap without uncommitted rows continues past gap",
+			committed: []int64{1, 2, 5000},
+			since:     0,
+			limit:     10,
+			wantIDs:   []int64{1, 2, 5000},
+		},
+		{
+			name:      "huge gap without uncommitted rows continues past gap",
+			committed: []int64{1, 2, 5},
+			since:     0,
+			limit:     10,
+			wantIDs:   []int64{1, 2, 5},
+		},
+		{
+			name:      "since skips already-seen events and continues past committed gap",
+			committed: []int64{3, 4, 6},
+			since:     2,
+			limit:     10,
+			wantIDs:   []int64{3, 4, 6},
+		},
+	}
 
-	// Insert committed contiguous events: 1,2,3
-	insertEvent(t, db, 1, "test")
-	insertEvent(t, db, 2, "test")
-	insertEvent(t, db, 3, "test")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			defer func() { _ = db.Close() }()
+			ensureOutboxTable(t, db)
 
-	store := NewEventStore(db, outboxTable)
-	ctx := context.Background()
+			for _, id := range tc.committed {
+				insertEvent(t, db, id, "test")
+			}
 
-	events, err := store.FetchBatchOfEventsSince(ctx, -1, 10)
-	require.NoError(t, err)
-	require.Len(t, events, 3)
-	require.Equal(t, []int64{1, 2, 3}, fetchIDs(events))
+			if len(tc.uncommitted) > 0 {
+				tx, err := db.Begin()
+				require.NoError(t, err)
+				defer func() { _ = tx.Rollback() }()
+				for _, id := range tc.uncommitted {
+					insertEvent(t, tx, id, "test")
+				}
+			}
+
+			store := NewEventStore(db, outboxTable)
+			events, err := store.FetchBatchOfEventsSince(context.Background(), tc.since, tc.limit)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantIDs, fetchIDs(events))
+		})
+	}
 }
 
-func TestEventStore_GapDetection_GapWithUncommittedPresent(t *testing.T) {
+// TestEventStore_GapDetection_RepeatableAttemptAfterCommit verifies that once
+// uncommitted rows are committed, a subsequent fetch returns all events including
+// those that were previously hidden behind the gap.
+func TestEventStore_GapDetection_RepeatableAttemptAfterCommit(t *testing.T) {
 	db := openTestDB(t)
 	defer func() { _ = db.Close() }()
 	ensureOutboxTable(t, db)
 
-	// Committed: 1,2,5
-	insertEvent(t, db, 1, "test")
-	insertEvent(t, db, 2, "test")
-	insertEvent(t, db, 5, "test")
-
-	// Open a separate transaction and insert ID 3 but do not commit yet
-	tx, err := db.Begin()
-	require.NoError(t, err)
-	insertEvent(t, tx, 3, "test")
-	// Note: we intentionally do not commit until after the fetch
-	defer func() { _ = tx.Rollback() }()
-
-	store := NewEventStore(db, outboxTable)
-	ctx := context.Background()
-
-	events, err := store.FetchBatchOfEventsSince(ctx, 0, 10)
-	require.NoError(t, err)
-
-	// We expect the filter to stop before the gap because ID 3 exists (uncommitted) → only 1,2 returned
-	require.Equal(t, []int64{1, 2}, fetchIDs(events))
-}
-
-func TestEventStore_GapDetection_GapWithMultipleUncommittedPresent(t *testing.T) {
-	db := openTestDB(t)
-	defer func() { _ = db.Close() }()
-	ensureOutboxTable(t, db)
-
-	// Committed: 1,2,5
 	insertEvent(t, db, 1, "test")
 	insertEvent(t, db, 2, "test")
 	insertEvent(t, db, 12, "test")
 
-	// Open a separate transaction and insert ID 3 but do not commit yet
 	tx, err := db.Begin()
 	require.NoError(t, err)
-	insertEvent(t, tx, 3, "test")
-	insertEvent(t, tx, 4, "test")
-	insertEvent(t, tx, 5, "test")
-	insertEvent(t, tx, 6, "test")
-	insertEvent(t, tx, 7, "test")
-	insertEvent(t, tx, 10, "test")
-	// Note: we intentionally do not commit until after the fetch
-	defer func() { _ = tx.Rollback() }()
-
-	store := NewEventStore(db, outboxTable)
-	ctx := context.Background()
-
-	events, err := store.FetchBatchOfEventsSince(ctx, 0, 10)
-	require.NoError(t, err)
-
-	// We expect the filter to stop before the gap because ID 3 exists (uncommitted) → only 1,2 returned
-	require.Equal(t, []int64{1, 2}, fetchIDs(events))
-}
-
-func TestEventStore_GapDetection_GapWithRepeatableAttempt(t *testing.T) {
-	db := openTestDB(t)
-	defer func() { _ = db.Close() }()
-	ensureOutboxTable(t, db)
-
-	// Committed: 1,2,5
-	insertEvent(t, db, 1, "test")
-	insertEvent(t, db, 2, "test")
-	insertEvent(t, db, 12, "test")
-
-	// Open a separate transaction and insert ID 3 but do not commit yet
-	tx, err := db.Begin()
-	require.NoError(t, err)
-	insertEvent(t, tx, 3, "test")
-	insertEvent(t, tx, 4, "test")
-	insertEvent(t, tx, 5, "test")
-	insertEvent(t, tx, 6, "test")
-	insertEvent(t, tx, 7, "test")
-	insertEvent(t, tx, 10, "test")
+	for _, id := range []int64{3, 4, 5, 6, 7, 10} {
+		insertEvent(t, tx, id, "test")
+	}
 
 	store := NewEventStore(db, outboxTable)
 	ctx := context.Background()
 
 	firstEvents, err := store.FetchBatchOfEventsSince(ctx, 0, 10)
 	require.NoError(t, err)
-	// Now commit the transaction to make those events visible
-	err = tx.Commit()
-	require.NoError(t, err)
+	require.Equal(t, []int64{1, 2}, fetchIDs(firstEvents), "before commit: stops before gap")
+
+	require.NoError(t, tx.Commit())
+
 	secondEvents, err := store.FetchBatchOfEventsSince(ctx, 0, 10)
 	require.NoError(t, err)
-
-	// We expect the filter to stop before the gap because ID 3 exists (uncommitted) → only 1,2 returned
-	require.Equal(t, []int64{1, 2}, fetchIDs(firstEvents))
-	// After commit, we expect all events to be returned
-	require.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 10, 12}, fetchIDs(secondEvents))
-}
-
-func TestEventStore_GapDetection_GapWithoutUncommittedPresent(t *testing.T) {
-	db := openTestDB(t)
-	defer func() { _ = db.Close() }()
-	ensureOutboxTable(t, db)
-
-	// Committed: 1,2,5 (no uncommitted rows)
-	insertEvent(t, db, 1, "test")
-	insertEvent(t, db, 2, "test")
-	insertEvent(t, db, 5000, "test")
-
-	store := NewEventStore(db, outboxTable)
-	ctx := context.Background()
-
-	events, err := store.FetchBatchOfEventsSince(ctx, 0, 10)
-	require.NoError(t, err)
-
-	// Since missing IDs (3,4) are not present (even uncommitted), the filter continues and includes 5
-	require.Equal(t, []int64{1, 2, 5000}, fetchIDs(events))
-}
-
-func TestEventStore_GapDetection_HugeGapWithoutUncommittedPresent(t *testing.T) {
-	db := openTestDB(t)
-	defer func() { _ = db.Close() }()
-	ensureOutboxTable(t, db)
-
-	// Committed: 1,2,5 (no uncommitted rows)
-	insertEvent(t, db, 1, "test")
-	insertEvent(t, db, 2, "test")
-	insertEvent(t, db, 5, "test")
-
-	store := NewEventStore(db, outboxTable)
-	ctx := context.Background()
-
-	events, err := store.FetchBatchOfEventsSince(ctx, 0, 10)
-	require.NoError(t, err)
-
-	// Since missing IDs (3,4) are not present (even uncommitted), the filter continues and includes 5
-	require.Equal(t, []int64{1, 2, 5}, fetchIDs(events))
-}
-
-func TestEventStore_GapDetection_SinceLastIncrementID(t *testing.T) {
-	db := openTestDB(t)
-	defer func() { _ = db.Close() }()
-	ensureOutboxTable(t, db)
-
-	// Committed: 3,4,6 (start since 2)
-	insertEvent(t, db, 3, "test")
-	insertEvent(t, db, 4, "test")
-	insertEvent(t, db, 6, "test")
-
-	store := NewEventStore(db, outboxTable)
-	ctx := context.Background()
-
-	events, err := store.FetchBatchOfEventsSince(ctx, 2, 10)
-	require.NoError(t, err)
-
-	// Missing 5 but not present in DB → continue and include 6
-	require.Equal(t, []int64{3, 4, 6}, fetchIDs(events))
+	require.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 10, 12}, fetchIDs(secondEvents), "after commit: all events visible")
 }
 
 // countingGapDetector is a GapDetector that counts how often HasUncommittedID is called.
@@ -304,8 +243,9 @@ func (c *countingGapDetector) HasUncommittedID(ctx context.Context, low, high in
 	return c.store.HasUncommittedID(ctx, low, high)
 }
 
-// Test ensures that HasUncommittedID is called exactly once for a large gap.
-func TestEventStore_GapDetection_HasUncommittedCalledOnceForLargeGap(t *testing.T) {
+// TestEventStore_HasUncommittedCalledOnceForLargeGap ensures that HasUncommittedID
+// is called exactly once per gap range, not once per missing ID.
+func TestEventStore_HasUncommittedCalledOnceForLargeGap(t *testing.T) {
 	db := openTestDB(t)
 	defer func() { _ = db.Close() }()
 	ensureOutboxTable(t, db)
