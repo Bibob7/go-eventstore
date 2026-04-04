@@ -10,9 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gofrs/uuid/v5"
+
 	"github.com/Bibob7/go-eventstore"
 	"github.com/Bibob7/go-eventstore/filter"
-	"github.com/gofrs/uuid/v5"
 )
 
 type EventStore struct {

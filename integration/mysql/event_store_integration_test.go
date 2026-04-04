@@ -8,11 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Bibob7/go-eventstore"
-	"github.com/Bibob7/go-eventstore/filter"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gofrs/uuid/v5"
 	"github.com/stretchr/testify/require"
+
+	"github.com/Bibob7/go-eventstore"
+	"github.com/Bibob7/go-eventstore/filter"
 )
 
 const outboxTable = "outbox"
