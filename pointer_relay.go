@@ -34,39 +34,48 @@ type Handler interface {
 	Name() string
 }
 
+// relayConfig holds all options collected during NewPointerRelay construction.
+// It is separate from pointerRelay so that decorator-specific settings are not
+// stored on the relay itself.
+type relayConfig struct {
+	batchSize             int
+	handleDelay           time.Duration
+	batchDelay            time.Duration
+	conditionalBatchDelay time.Duration
+}
+
 // RelayOption is a functional option for configuring a PointerRelay.
-type RelayOption func(*pointerRelay)
+type RelayOption func(*relayConfig)
 
 // WithBatchSize sets the maximum number of events fetched per relay run.
 // Defaults to DefaultBatchSize.
 func WithBatchSize(batchSize int) RelayOption {
-	return func(p *pointerRelay) {
-		p.batchSize = batchSize
+	return func(c *relayConfig) {
+		c.batchSize = batchSize
 	}
 }
 
 // WithHandleDelay inserts a pause between processing individual events within a batch.
 // Useful for rate-limiting or giving downstream systems time to react.
 func WithHandleDelay(delay time.Duration) RelayOption {
-	return func(p *pointerRelay) {
-		p.handleDelay = delay
+	return func(c *relayConfig) {
+		c.handleDelay = delay
 	}
 }
 
 // WithBatchDelay sets an unconditional delay between every relay run.
 // The relay waits this duration after each batch, regardless of the result.
 func WithBatchDelay(d time.Duration) RelayOption {
-	return func(p *pointerRelay) {
-		p.batchDelay = d
+	return func(c *relayConfig) {
+		c.batchDelay = d
 	}
 }
 
-// WithConditionalBatchDelay sets a delay between relay runs when no events are ready.
-// When ErrEventNotReadyToProcess is returned, the relay waits this duration
-// before the next run. Defaults to DefaultWaitTime.
+// WithConditionalBatchDelay sets a delay between relay runs when ErrEventNotReadyToProcess
+// is returned. The relay waits this duration before the next run. Defaults to DefaultWaitTime.
 func WithConditionalBatchDelay(d time.Duration) RelayOption {
-	return func(p *pointerRelay) {
-		p.conditionalBatchDelay = d
+	return func(c *relayConfig) {
+		c.conditionalBatchDelay = d
 	}
 }
 
@@ -94,38 +103,39 @@ type Relay interface {
 }
 
 type pointerRelay struct {
-	eventStore            PointerStore
-	incrementIDStore      IncrementIDStore
-	handler               []Handler
-	name                  string
-	batchSize             int
-	handleDelay           time.Duration
-	batchDelay            time.Duration
-	conditionalBatchDelay time.Duration
+	eventStore       PointerStore
+	incrementIDStore IncrementIDStore
+	handler          []Handler
+	name             string
+	batchSize        int
+	handleDelay      time.Duration
 }
 
 // NewPointerRelay creates a cursor-based Relay that reads from store and tracks
 // its position in incrementIDStore. The name must be unique across all relays
 // sharing the same IncrementIDStore.
 func NewPointerRelay(name string, store PointerStore, incrementIDStore IncrementIDStore, opts ...RelayOption) Relay {
+	cfg := &relayConfig{batchSize: DefaultBatchSize}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
 	p := &pointerRelay{
 		name:             name,
 		eventStore:       store,
 		incrementIDStore: incrementIDStore,
-		batchSize:        DefaultBatchSize,
-	}
-	for _, opt := range opts {
-		opt(p)
+		batchSize:        cfg.batchSize,
+		handleDelay:      cfg.handleDelay,
 	}
 
 	var relay Relay = p
 
-	if p.conditionalBatchDelay > 0 {
-		relay = newDelayedRelay(relay, p.conditionalBatchDelay)
+	if cfg.conditionalBatchDelay > 0 {
+		relay = newDelayedRelay(relay, cfg.conditionalBatchDelay)
 	}
 
-	if p.batchDelay > 0 {
-		relay = newBatchDelayedRelay(relay, p.batchDelay)
+	if cfg.batchDelay > 0 {
+		relay = newBatchDelayedRelay(relay, cfg.batchDelay)
 	}
 
 	return relay
@@ -205,83 +215,4 @@ func (p *pointerRelay) handleEvent(ctx context.Context, storedEvent StoredEvent,
 		return err
 	}
 	return nil
-}
-
-// delayedRelay is a wrapper around Relay that delays the next batch of events relay.
-// It delays the execution of not yet ready events by a specified wait time.
-type delayedRelay struct {
-	relay    Relay
-	waitTime time.Duration
-}
-
-func newDelayedRelay(relay Relay, waitTime time.Duration) Relay {
-	if waitTime <= 0 {
-		waitTime = DefaultWaitTime
-	}
-	return &delayedRelay{
-		relay:    relay,
-		waitTime: waitTime,
-	}
-}
-
-func (r delayedRelay) Name() string {
-	return r.relay.Name()
-}
-
-func (r delayedRelay) RegisterHandler(handler ...Handler) Relay {
-	r.relay.RegisterHandler(handler...)
-	return r
-}
-
-func (r delayedRelay) Run(ctx context.Context) error {
-	err := r.relay.Run(ctx)
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, ErrEventNotReadyToProcess) {
-		slog.Info("Events relayed, delaying next batch because of ErrEventNotReadyToProcess", "name", r.relay.Name(), "wait_time", r.waitTime)
-		select {
-		case <-ctx.Done():
-			slog.Debug("Context done, stopping delayed relay", "name", r.relay.Name())
-			return ctx.Err()
-		case <-time.After(r.waitTime):
-			return nil
-		}
-	}
-	return err
-}
-
-// batchDelayedRelay is a wrapper around Relay that adds an unconditional delay
-// after every batch run, regardless of the result.
-type batchDelayedRelay struct {
-	relay      Relay
-	batchDelay time.Duration
-}
-
-func newBatchDelayedRelay(relay Relay, batchDelay time.Duration) Relay {
-	return &batchDelayedRelay{
-		relay:      relay,
-		batchDelay: batchDelay,
-	}
-}
-
-func (r batchDelayedRelay) Name() string {
-	return r.relay.Name()
-}
-
-func (r batchDelayedRelay) RegisterHandler(handler ...Handler) Relay {
-	r.relay.RegisterHandler(handler...)
-	return r
-}
-
-func (r batchDelayedRelay) Run(ctx context.Context) error {
-	err := r.relay.Run(ctx)
-	slog.Debug("Delaying next batch", "name", r.relay.Name(), "batch_delay", r.batchDelay)
-	select {
-	case <-ctx.Done():
-		slog.Debug("Context done, stopping batch delayed relay", "name", r.relay.Name())
-		return ctx.Err()
-	case <-time.After(r.batchDelay):
-	}
-	return err
 }
