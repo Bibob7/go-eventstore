@@ -10,7 +10,7 @@ type Store interface {
 	Append(ctx context.Context, events ...DomainEvent) error
 }
 
-// CleanUpStore extends Store with the ability to fetch and remove
+// CleanUpStore provides the ability to fetch and remove
 // already-processed events, for use in outbox cleanup patterns.
 type CleanUpStore interface {
 	// FetchBatchOfEvents returns up to limit events starting from the smallest IncrementID.
@@ -19,7 +19,7 @@ type CleanUpStore interface {
 	CleanUpEvents(ctx context.Context, events []StoredEvent) error
 }
 
-// PointerStore extends Store with cursor-based event fetching.
+// PointerStore provides cursor-based event fetching.
 // Implementations track a position (IncrementID) and return events after it,
 // enabling relay consumers to process events exactly once.
 type PointerStore interface {
