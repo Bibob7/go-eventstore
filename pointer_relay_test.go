@@ -31,10 +31,6 @@ func (m *mockPointerStore) FetchBatchOfEventsSince(ctx context.Context, incremen
 	return result, nil
 }
 
-func (m *mockPointerStore) Append(ctx context.Context, events ...DomainEvent) error {
-	return nil
-}
-
 type mockIncrementIDStore struct {
 	incrementIDs map[string]int64
 	getErr       error

@@ -16,8 +16,6 @@ type mockCleanUpStore struct {
 	cleanedUp  []StoredEvent
 }
 
-func (m *mockCleanUpStore) Append(_ context.Context, _ ...DomainEvent) error { return nil }
-
 func (m *mockCleanUpStore) FetchBatchOfEvents(_ context.Context, limit int) ([]StoredEvent, error) {
 	if m.fetchErr != nil {
 		return nil, m.fetchErr
@@ -41,7 +39,7 @@ func newStoredEvent(incrementID int64) StoredEvent {
 	return StoredEvent{ID: id, EntityID: id, IncrementID: incrementID, EventType: "test-event", OccurredAt: time.Now()}
 }
 
-func TestTransitionalRelay_Name(t *testing.T) {
+func TestTransientRelay_Name(t *testing.T) {
 	tests := []struct {
 		name      string
 		relayName string
@@ -51,7 +49,7 @@ func TestTransitionalRelay_Name(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			relay := NewTransitionalRelay(tc.relayName, &mockCleanUpStore{})
+			relay := NewTransientRelay(tc.relayName, &mockCleanUpStore{})
 			if relay.Name() != tc.relayName {
 				t.Fatalf("expected name %q, got %q", tc.relayName, relay.Name())
 			}
@@ -59,7 +57,7 @@ func TestTransitionalRelay_Name(t *testing.T) {
 	}
 }
 
-func TestTransitionalRelay_Run(t *testing.T) {
+func TestTransientRelay_Run(t *testing.T) {
 	tests := []struct {
 		name          string
 		events        []StoredEvent
@@ -149,7 +147,7 @@ func TestTransitionalRelay_Run(t *testing.T) {
 				cleanUpErr: tc.cleanUpErr,
 			}
 			h := &mockHandler{err: tc.handlerErr}
-			relay := NewTransitionalRelay("r", store, tc.opts...)
+			relay := NewTransientRelay("r", store, tc.opts...)
 			relay.RegisterHandler(h)
 
 			var h2 *mockHandler
@@ -176,10 +174,10 @@ func TestTransitionalRelay_Run(t *testing.T) {
 	}
 }
 
-func TestTransitionalRelay_CleansUpEachEventIndividually(t *testing.T) {
+func TestTransientRelay_CleansUpEachEventIndividually(t *testing.T) {
 	events := []StoredEvent{newStoredEvent(1), newStoredEvent(2)}
 	store := &mockCleanUpStore{events: events}
-	relay := NewTransitionalRelay("r", store)
+	relay := NewTransientRelay("r", store)
 	relay.RegisterHandler(&mockHandler{})
 
 	if err := relay.Run(context.Background()); err != nil {
