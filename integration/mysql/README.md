@@ -37,5 +37,5 @@ go run ./example/transient_relay/ # TransientRelay that deletes events after pro
 The default DSN matches the docker-compose setup. Override it via the `MYSQL_DSN` environment variable:
 
 ```sh
-MYSQL_DSN="user:pass@tcp(host:3306)/db?parseTime=true" go run ./example/append/
+MYSQL_DSN="user:pass@tcp(host:3306)/db" go run ./example/append/
 ```
