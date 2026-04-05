@@ -5,7 +5,7 @@
 //
 // Run with:
 //
-//	docker compose up -d
+//	docker compose up --wait
 //	go run ./example/pointer_relay/
 package main
 
@@ -30,15 +30,24 @@ import (
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
 
+func run() error {
 	db, err := sql.Open("mysql", shared.DSN())
 	if err != nil {
-		log.Fatalf("open db: %v", err)
+		return fmt.Errorf("open db: %w", err)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Printf("close db: %v", err)
+		}
+	}()
 
 	if err := shared.WaitForDB(db); err != nil {
-		log.Fatalf("db not ready: %v", err)
+		return fmt.Errorf("db not ready: %w", err)
 	}
 
 	bundle, err := mysqlstore.NewEventStoreBundle(db, mysqlstore.Config{
@@ -46,7 +55,7 @@ func main() {
 		IncrementIDTableName: "event_increment_id",
 	})
 	if err != nil {
-		log.Fatalf("create bundle: %v", err)
+		return fmt.Errorf("create bundle: %w", err)
 	}
 
 	ctx := context.Background()
@@ -60,7 +69,7 @@ func main() {
 		shared.NewOrderPlaced("carol", "headphones", 3),
 	} {
 		if err := bundle.EventStore.Append(ctx, e); err != nil {
-			log.Fatalf("append: %v", err)
+			return fmt.Errorf("append: %w", err)
 		}
 		fmt.Printf("  appended %s (%s)\n", e.ID(), e.CustomerID)
 	}
@@ -84,35 +93,50 @@ func main() {
 	)
 	notificationRelay.RegisterHandler(&loggingHandler{name: "notifications"})
 
-	runConcurrent(ctx, analyticsRelay, notificationRelay)
+	if err := runConcurrent(ctx, analyticsRelay, notificationRelay); err != nil {
+		return err
+	}
 
 	// --- Step 3: New events arrive; relays resume from their saved cursor ---
 	fmt.Println("\n=== Step 3: Appending one more event ===")
 
 	newEvent := shared.NewOrderPlaced("dave", "webcam", 4)
 	if err := bundle.EventStore.Append(ctx, newEvent); err != nil {
-		log.Fatalf("append: %v", err)
+		return fmt.Errorf("append: %w", err)
 	}
 	fmt.Printf("  appended %s (dave)\n", newEvent.ID())
 
 	fmt.Println("\n=== Step 4: Re-running relays – only the new event is processed ===")
-	runConcurrent(ctx, analyticsRelay, notificationRelay)
+	if err := runConcurrent(ctx, analyticsRelay, notificationRelay); err != nil {
+		return err
+	}
 
 	fmt.Println("\nDone. Events remain in the outbox (PointerRelay only tracks position).")
+	return nil
 }
 
-func runConcurrent(ctx context.Context, relays ...eventstore.Relay) {
-	var wg sync.WaitGroup
+func runConcurrent(ctx context.Context, relays ...eventstore.Relay) error {
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		errs []error
+	)
 	for _, r := range relays {
 		wg.Add(1)
 		go func(relay eventstore.Relay) {
 			defer wg.Done()
 			if err := relay.Run(ctx); err != nil {
-				log.Printf("relay %s: %v", relay.Name(), err)
+				mu.Lock()
+				errs = append(errs, fmt.Errorf("relay %s: %w", relay.Name(), err))
+				mu.Unlock()
 			}
 		}(r)
 	}
 	wg.Wait()
+	if len(errs) > 0 {
+		return errs[0]
+	}
+	return nil
 }
 
 // loggingHandler prints each event it processes.

@@ -3,7 +3,7 @@
 //
 // Run with:
 //
-//	docker compose up -d
+//	docker compose up --wait
 //	go run ./example/append/
 package main
 
@@ -24,15 +24,24 @@ import (
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
 
+func run() error {
 	db, err := sql.Open("mysql", shared.DSN())
 	if err != nil {
-		log.Fatalf("open db: %v", err)
+		return fmt.Errorf("open db: %w", err)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Printf("close db: %v", err)
+		}
+	}()
 
 	if err := shared.WaitForDB(db); err != nil {
-		log.Fatalf("db not ready: %v", err)
+		return fmt.Errorf("db not ready: %w", err)
 	}
 
 	bundle, err := mysqlstore.NewEventStoreBundle(db, mysqlstore.Config{
@@ -40,7 +49,7 @@ func main() {
 		IncrementIDTableName: "event_increment_id",
 	})
 	if err != nil {
-		log.Fatalf("create bundle: %v", err)
+		return fmt.Errorf("create bundle: %w", err)
 	}
 
 	ctx := context.Background()
@@ -52,7 +61,7 @@ func main() {
 	e2 := shared.NewOrderPlaced("bob", "monitor", 2)
 
 	if err := bundle.EventStore.Append(ctx, e1, e2); err != nil {
-		log.Fatalf("append: %v", err)
+		return fmt.Errorf("append: %w", err)
 	}
 	fmt.Printf("  appended %s (alice / keyboard)\n", e1.ID())
 	fmt.Printf("  appended %s (bob / monitor)\n", e2.ID())
@@ -73,8 +82,9 @@ func main() {
 		return nil
 	}, nil)
 	if err != nil {
-		log.Fatalf("transaction: %v", err)
+		return fmt.Errorf("transaction: %w", err)
 	}
 
 	fmt.Println("\nDone. Inspect the outbox table to see the stored events.")
+	return nil
 }

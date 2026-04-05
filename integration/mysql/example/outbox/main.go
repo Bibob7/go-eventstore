@@ -5,7 +5,7 @@
 //
 // Run with:
 //
-//	docker compose up -d
+//	docker compose up --wait
 //	go run ./example/outbox/
 package main
 
@@ -28,19 +28,28 @@ import (
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
 
+func run() error {
 	db, err := sql.Open("mysql", shared.DSN())
 	if err != nil {
-		log.Fatalf("open db: %v", err)
+		return fmt.Errorf("open db: %w", err)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Printf("close db: %v", err)
+		}
+	}()
 
 	if err := shared.WaitForDB(db); err != nil {
-		log.Fatalf("db not ready: %v", err)
+		return fmt.Errorf("db not ready: %w", err)
 	}
 
 	if err := createOrdersTable(db); err != nil {
-		log.Fatalf("create orders table: %v", err)
+		return fmt.Errorf("create orders table: %w", err)
 	}
 
 	bundle, err := mysqlstore.NewEventStoreBundle(db, mysqlstore.Config{
@@ -48,7 +57,7 @@ func main() {
 		IncrementIDTableName: "event_increment_id",
 	})
 	if err != nil {
-		log.Fatalf("create bundle: %v", err)
+		return fmt.Errorf("create bundle: %w", err)
 	}
 
 	ctx := context.Background()
@@ -75,7 +84,7 @@ func main() {
 		return bundle.EventStore.Append(txCtx, event)
 	}, nil)
 	if err != nil {
-		log.Fatalf("place order: %v", err)
+		return fmt.Errorf("place order: %w", err)
 	}
 	fmt.Printf("  order %s placed, event %s written to outbox\n", event.AggregateID(), event.ID())
 
@@ -88,10 +97,11 @@ func main() {
 	relay.RegisterHandler(&printHandler{})
 
 	if err := relay.Run(ctx); err != nil {
-		log.Fatalf("relay run: %v", err)
+		return fmt.Errorf("relay run: %w", err)
 	}
 
 	fmt.Println("\nOutbox is now empty – the event was consumed and deleted.")
+	return nil
 }
 
 // printHandler prints every event it receives, simulating a message broker publish.

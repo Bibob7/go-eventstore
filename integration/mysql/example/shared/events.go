@@ -31,5 +31,5 @@ func NewOrderPlaced(customerID, product string, amount int) *OrderPlaced {
 
 func (e *OrderPlaced) ID() uuid.UUID          { return e.EventID }
 func (e *OrderPlaced) AggregateID() uuid.UUID { return e.OrderID }
-func (e *OrderPlaced) EventType() string       { return "order.placed" }
-func (e *OrderPlaced) OccurredAt() time.Time   { return e.OccurredOn }
+func (e *OrderPlaced) EventType() string      { return "order.placed" }
+func (e *OrderPlaced) OccurredAt() time.Time  { return e.OccurredOn }
