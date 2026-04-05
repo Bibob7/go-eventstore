@@ -79,7 +79,7 @@ func (s *EventStore) Append(ctx context.Context, domainEvents ...eventstore.Doma
 
 	if tx, exists := GetTx(ctx); exists {
 		slog.Debug("Appending domainEvents to DomainEvent eventStore in transaction")
-		_, err := tx.Exec(sqlStmt, valuesArgs...)
+		_, err := tx.ExecContext(ctx, sqlStmt, valuesArgs...)
 		return err
 	}
 	slog.Debug("Appending domainEvents to DomainEvent eventStore without transaction")
