@@ -84,7 +84,7 @@ relay := eventstore.NewPointerRelay(
     bundle.EventStore,
     bundle.IncrementIDStore,
     eventstore.WithBatchSize(50),
-    eventstore.WithBatchDelay(2*time.Second),
+    eventstore.WithConditionalBatchDelay(2*time.Second),
 )
 relay.RegisterHandler(&NotifyHandler{})
 
@@ -118,7 +118,7 @@ relay := eventstore.NewPointerRelay(
 
 **IdempotencyRegistry** — prevents duplicate handler invocations. Uses a `pending → success | failed` state machine per event/handler pair.
 
-**ErrEventNotReadyToProcess** — handlers can return this to signal a temporary condition. The relay will pause (configurable via `WithBatchDelay`) instead of treating it as a hard failure.
+**ErrEventNotReadyToProcess** — handlers can return this to signal a temporary condition. The relay will pause (configurable via `WithConditionalBatchDelay`) instead of treating it as a hard failure.
 
 ## Running integration tests
 

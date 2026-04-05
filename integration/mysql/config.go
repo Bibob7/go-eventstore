@@ -1,4 +1,4 @@
-package eventstore
+package mysql
 
 // Config holds the configuration for an event store integration.
 // All table names are required and must match the schema created

@@ -14,7 +14,7 @@ type EventStoreBundle struct {
 }
 
 // NewEventStoreBundle creates a MySQL connection and initializes event store infrastructure.
-func NewEventStoreBundle(db *sql.DB, cfg eventstore.Config) (*EventStoreBundle, error) {
+func NewEventStoreBundle(db *sql.DB, cfg Config) (*EventStoreBundle, error) {
 	return &EventStoreBundle{
 		DB:               db,
 		EventStore:       NewEventStore(db, cfg.OutboxTableName),
