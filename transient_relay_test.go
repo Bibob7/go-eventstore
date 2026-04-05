@@ -233,8 +233,9 @@ func TestTransientRelay_CleansUpEventsAsBatch(t *testing.T) {
 	}
 }
 
-// countingHandler fails on the Nth Handle call (1-based) when failOnCall > 0,
-// and otherwise returns err on every call (or nil if err is nil).
+// countingHandler returns err on every Handle call when failOnCall == 0.
+// When failOnCall > 0, it returns err only on that Nth Handle call (1-based)
+// and returns nil on all other calls.
 type countingHandler struct {
 	calls      int
 	err        error
