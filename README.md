@@ -1,13 +1,13 @@
-# eventstore
+# Go Event Store
 
-A lightweight Go library for the transactional outbox pattern. It provides the core abstractions for appending domain events and relaying them to consumers — exactly once, with gap-safe ordering.
+A lightweight Go library for the transactional outbox pattern. It provides the core abstractions for appending domain events and relaying them to consumers with gap-safe, cursor-based ordering.
 
 ## Modules
 
 | Module | Description |
 |--------|-------------|
-| `github.com/Bibob7/go-eventstore` | Core interfaces and relay logic (no DB dependency) |
-| `github.com/Bibob7/go-eventstore/integration/mysql` | MySQL implementation of Store, IncrementIDStore, and IdempotencyRegistry |
+| `github.com/Bibob7/go-eventstore` | Core interfaces, pointer relay, and transient relay (no DB dependency) |
+| `github.com/Bibob7/go-eventstore/integration/mysql` | MySQL implementation of `Store`, `PointerStore`, `CleanUpStore`, and `IncrementIDStore` |
 
 ## Installation
 
@@ -21,13 +21,13 @@ go get github.com/Bibob7/go-eventstore/integration/mysql
 
 ## Database setup
 
-Apply the DDL from [`sql/mysql/schema.sql`](sql/mysql/schema.sql) to create the required tables. All table names are configurable via `eventstore.Config`.
+Apply the DDL from [`integration/mysql/sql/mysql/schema.sql`](integration/mysql/sql/mysql/schema.sql) to create the required tables. Table names are configurable via `mysql.Config`:
 
-```sql
--- example: use custom table names
-OutboxTableName:      "my_outbox"
-IncrementIDTableName: "my_relay_positions"
-IdempotencyTableName: "my_idempotency"
+```go
+cfg := mysqlstore.Config{
+    OutboxTableName:      "outbox",
+    IncrementIDTableName: "event_increment_id",
+}
 ```
 
 ## Quickstart
@@ -42,16 +42,16 @@ type OrderPlaced struct {
     OrderID     string
 }
 
-func (e OrderPlaced) ID() uuid.UUID        { return e.id }
+func (e OrderPlaced) ID() uuid.UUID          { return e.id }
 func (e OrderPlaced) AggregateID() uuid.UUID { return e.aggregateID }
-func (e OrderPlaced) EventType() string    { return "OrderPlaced" }
-func (e OrderPlaced) OccurredAt() time.Time { return e.occurredAt }
+func (e OrderPlaced) EventType() string      { return "OrderPlaced" }
+func (e OrderPlaced) OccurredAt() time.Time  { return e.occurredAt }
 ```
 
 ### 2. Append events
 
 ```go
-store := mysql.NewEventStore(db, cfg.OutboxTableName)
+store := mysqlstore.NewEventStore(db, "outbox")
 
 err := store.Append(ctx, OrderPlaced{
     id:          uuid.Must(uuid.NewV4()),
@@ -74,10 +74,15 @@ func (h *NotifyHandler) Handle(ctx context.Context, event eventstore.StoredEvent
 }
 ```
 
-### 4. Run a Relay
+### 4. Run a PointerRelay
+
+A `PointerRelay` tracks the last successfully processed `IncrementID` per consumer so it can resume after a restart without reprocessing events.
 
 ```go
-bundle, _ := mysql.NewEventStoreBundle(db, cfg)
+bundle := mysqlstore.NewEventStoreBundle(db, mysqlstore.Config{
+    OutboxTableName:      "outbox",
+    IncrementIDTableName: "event_increment_id",
+})
 
 relay := eventstore.NewPointerRelay(
     "order-relay",
@@ -97,34 +102,57 @@ for {
 }
 ```
 
-### 5. Idempotent processing (optional)
+### 5. Alternatively: TransientRelay
+
+A `TransientRelay` deletes each event from the store after all handlers have processed it successfully. Useful when the outbox should not grow indefinitely and no separate cleanup job is desired.
 
 ```go
-registry := mysql.NewIdempotencyRegistry(db, cfg.IdempotencyTableName)
-
-relay := eventstore.NewPointerRelay(
+relay := eventstore.NewTransientRelay(
     "order-relay",
-    bundle.EventStore,
-    bundle.IncrementIDStore,
-    eventstore.WithIdempotencyRegistry(registry),
+    bundle.EventStore, // EventStore also implements CleanUpStore
+    eventstore.WithBatchSize(50),
 )
+relay.RegisterHandler(&NotifyHandler{})
 ```
+
+## Relay options
+
+| Option | Purpose |
+|---|---|
+| `WithBatchSize(n)` | Max events fetched per `Run` (default `DefaultBatchSize`). |
+| `WithHandleDelay(d)` | Pause between individual events within a batch. |
+| `WithBatchDelay(d)` | Unconditional delay between batches. |
+| `WithConditionalBatchDelay(d)` | Delay applied only when a handler returns `ErrEventNotReadyToProcess`. |
 
 ## Key concepts
 
-**PointerStore** — fetches events since a given `IncrementID`. The MySQL implementation applies gap detection to avoid delivering events out of order when concurrent transactions are in-flight.
+**PointerStore** — fetches events since a given `IncrementID`. The MySQL implementation applies gap detection to avoid delivering events out of order while concurrent transactions are in-flight.
 
 **IncrementIDStore** — persists the last successfully processed position per relay, enabling resumption after restarts.
 
-**IdempotencyRegistry** — prevents duplicate handler invocations. Uses a `pending → success | failed` state machine per event/handler pair.
+**CleanUpStore** — used by `TransientRelay` to fetch and remove already-processed events.
 
-**ErrEventNotReadyToProcess** — handlers can return this to signal a temporary condition. The relay will pause (configurable via `WithConditionalBatchDelay`) instead of treating it as a hard failure.
+**ErrEventNotReadyToProcess** — handlers return this to signal a temporary condition. The relay pauses (configurable via `WithConditionalBatchDelay`) instead of treating it as a hard failure.
+
+## Examples
+
+Runnable examples live under [`integration/mysql/example`](integration/mysql/example):
+
+```sh
+# from integration/mysql
+docker compose up --wait
+
+go run ./example/append/          # Appending events with and without a transaction
+go run ./example/outbox/          # Transactional outbox pattern (write + relay in one tx)
+go run ./example/pointer_relay/   # PointerRelay with cursor-based position tracking
+go run ./example/transient_relay/ # TransientRelay that deletes events after processing
+```
 
 ## Running integration tests
 
 ```bash
-# Start MySQL
-docker-compose -f docker-compose-test.yml up -d
+# Start MySQL (from integration/mysql)
+docker compose up --wait
 
 # Run
 INTEGRATION_TESTS=1 go test ./integration/mysql/...
