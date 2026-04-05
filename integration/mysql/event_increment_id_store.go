@@ -12,7 +12,11 @@ type EventIncrementIDStore struct {
 	tableName string
 }
 
+// NewEventIncrementIDStore constructs an EventIncrementIDStore bound to the
+// given database and table. The table name must be a valid SQL identifier;
+// otherwise this function panics.
 func NewEventIncrementIDStore(db *sql.DB, tableName string) *EventIncrementIDStore {
+	mustValidateIdentifier("tableName", tableName)
 	return &EventIncrementIDStore{
 		db:        db,
 		tableName: tableName,
