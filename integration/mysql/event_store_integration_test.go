@@ -232,6 +232,76 @@ func TestEventStore_GapDetection_RepeatableAttemptAfterCommit(t *testing.T) {
 	require.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 10, 12}, fetchIDs(secondEvents), "after commit: all events visible")
 }
 
+// testEvent is a minimal DomainEvent implementation for round-trip tests.
+type testEvent struct {
+	EventID     uuid.UUID `json:"event_id"`
+	AggregateId uuid.UUID `json:"aggregate_id"`
+	Payload     string    `json:"payload"`
+	OccurredOn  time.Time `json:"occurred_on"`
+}
+
+func (e *testEvent) ID() uuid.UUID          { return e.EventID }
+func (e *testEvent) AggregateID() uuid.UUID { return e.AggregateId }
+func (e *testEvent) EventType() string      { return "test.event" }
+func (e *testEvent) OccurredAt() time.Time  { return e.OccurredOn }
+
+// TestEventStore_AppendFetchRoundTrip verifies that Append followed by
+// FetchBatchOfEventsSince preserves all fields, including the aggregate ID
+// (which historically was scanned as a string and silently turned into
+// uuid.Nil) and OccurredAt (which must be timezone-stable).
+func TestEventStore_AppendFetchRoundTrip(t *testing.T) {
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		occurred time.Time
+	}{
+		{name: "UTC timestamp", occurred: time.Date(2026, 4, 5, 12, 34, 56, 0, time.UTC)},
+		{name: "local timezone timestamp", occurred: time.Date(2026, 4, 5, 14, 0, 0, 0, berlin)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			defer func() { _ = db.Close() }()
+			ensureOutboxTable(t, db)
+
+			eventID, err := uuid.NewV4()
+			require.NoError(t, err)
+			aggregateID, err := uuid.NewV4()
+			require.NoError(t, err)
+
+			evt := &testEvent{
+				EventID:     eventID,
+				AggregateId: aggregateID,
+				Payload:     "hello",
+				OccurredOn:  tc.occurred,
+			}
+
+			store := NewEventStore(db, outboxTable)
+			ctx := context.Background()
+
+			require.NoError(t, store.Append(ctx, evt))
+
+			events, err := store.FetchBatchOfEventsSince(ctx, -1, 10)
+			require.NoError(t, err)
+			require.Len(t, events, 1)
+
+			got := events[0]
+			require.Equal(t, eventID, got.ID, "event ID must round-trip")
+			require.Equal(t, aggregateID, got.EntityID, "aggregate ID must round-trip (not uuid.Nil)")
+			require.NotEqual(t, uuid.Nil, got.EntityID, "aggregate ID must not be zero UUID")
+			require.Equal(t, "test.event", got.EventType)
+			require.True(t, got.OccurredAt.Equal(tc.occurred),
+				"occurred_at must be equal regardless of timezone: got %s, want %s",
+				got.OccurredAt, tc.occurred)
+			require.Equal(t, time.UTC, got.OccurredAt.Location(),
+				"occurred_at must be returned in UTC")
+		})
+	}
+}
+
 // countingGapDetector is a GapDetector that counts how often HasUncommittedID is called.
 type countingGapDetector struct {
 	store *EventStore

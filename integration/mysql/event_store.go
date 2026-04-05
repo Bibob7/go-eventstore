@@ -21,7 +21,10 @@ type EventStore struct {
 	tableName string
 }
 
+// NewEventStore constructs an EventStore bound to the given database and table.
+// The table name must be a valid SQL identifier; otherwise this function panics.
 func NewEventStore(db *sql.DB, tableName string) *EventStore {
+	mustValidateIdentifier("tableName", tableName)
 	return &EventStore{
 		db:        db,
 		tableName: tableName,
@@ -66,24 +69,21 @@ func (s *EventStore) Append(ctx context.Context, domainEvents ...eventstore.Doma
 		valuesArgs[j+1] = binaryAggregateId
 		valuesArgs[j+2] = domainEvent.EventType()
 		valuesArgs[j+3] = eventPayloadJsonString
-		valuesArgs[j+4] = domainEvent.OccurredAt().Format(time.DateTime)
+		// Always persist in UTC so reads are timezone-stable, independent of
+		// the producer's local timezone or driver configuration.
+		valuesArgs[j+4] = domainEvent.OccurredAt().UTC().Format(time.DateTime)
 	}
 
-	// #nosec G201
+	// #nosec G201 -- tableName is validated in the constructor.
 	sqlStmt := fmt.Sprintf("INSERT INTO %s (event_id, aggregate_id, event_type, payload, occurred_at) VALUES %s", s.tableName, strings.Join(valuesStrings, ","))
 
-	var err error
-	tx, exists := GetTx(ctx)
-	if exists {
+	if tx, exists := GetTx(ctx); exists {
 		slog.Debug("Appending domainEvents to DomainEvent eventStore in transaction")
-		_, err = tx.Exec(sqlStmt, valuesArgs...)
-	} else {
-		slog.Debug("Appending domainEvents to DomainEvent eventStore without transaction")
-		_, err = s.db.ExecContext(ctx, sqlStmt, valuesArgs...)
+		_, err := tx.Exec(sqlStmt, valuesArgs...)
+		return err
 	}
-	if err != nil {
-		slog.Error("Error appending domainEvents to DomainEvent eventStore", "error", err)
-	}
+	slog.Debug("Appending domainEvents to DomainEvent eventStore without transaction")
+	_, err := s.db.ExecContext(ctx, sqlStmt, valuesArgs...)
 	return err
 }
 
@@ -96,14 +96,13 @@ func (s *EventStore) FetchBatchOfEvents(ctx context.Context, limit int) ([]event
 // FetchBatchOfEventsSince fetches a batch of events from the event store since the last incrementID.
 // Providing eventIDs is optional.
 func (s *EventStore) FetchBatchOfEventsSince(ctx context.Context, lastIncrementID int64, limit int) ([]eventstore.StoredEvent, error) {
-	// #nosec G201
+	// #nosec G201 -- tableName is validated in the constructor.
 	selectStmt := fmt.Sprintf(
 		"SELECT id, event_id, aggregate_id, event_type, payload, occurred_at FROM %s WHERE id > ? ORDER BY id ASC LIMIT ?",
 		s.tableName)
 	slog.Debug("Fetching events from eventStore", "lastIncrementID", lastIncrementID, "limit", limit, "selectStmt", selectStmt)
 	rows, err := s.db.QueryContext(ctx, selectStmt, lastIncrementID, limit)
 	if err != nil {
-		slog.Error("Error fetching events from eventStore", "error", err)
 		return nil, err
 	}
 	defer func() {
@@ -129,14 +128,11 @@ func (s *EventStore) CleanUpEvents(ctx context.Context, storedEvents []eventstor
 	valueArgs := make([]interface{}, len(storedEvents))
 	for i := range len(storedEvents) {
 		valuePlaceholder[i] = "?"
-		valueArgs[i] = fmt.Sprintf("%d", storedEvents[i].IncrementID)
+		valueArgs[i] = storedEvents[i].IncrementID
 	}
-	// #nosec G201
+	// #nosec G201 -- tableName is validated in the constructor.
 	sqlStmt := fmt.Sprintf("DELETE FROM %s WHERE id IN (%s)", s.tableName, strings.Join(valuePlaceholder, ","))
 	_, err := s.db.ExecContext(ctx, sqlStmt, valueArgs...)
-	if err != nil {
-		slog.Error("Error cleaning up storedEvents from DomainEvent eventStore", "error", err)
-	}
 	return err
 }
 
@@ -145,7 +141,7 @@ func (s *EventStore) HasUncommittedID(ctx context.Context, lowerBound, upperBoun
 	hasUncommittedID := false
 
 	err := WithTransaction(ctx, s.db, func(tx *sql.Tx) error {
-		// #nosec G201
+		// #nosec G201 -- tableName is validated in the constructor.
 		query := fmt.Sprintf("SELECT 1 FROM %s WHERE id >= ? AND id <= ? LIMIT 1", s.tableName)
 
 		var dummy int
@@ -174,31 +170,37 @@ func (s *EventStore) transformToStoredEvents(rows *sql.Rows) ([]eventstore.Store
 		var (
 			id           int64
 			eventID      []byte
-			aggregateId  string
+			aggregateID  []byte
 			eventPayload string
 			eventType    string
 			occurredAt   string
 		)
-		err := rows.Scan(&id, &eventID, &aggregateId, &eventType, &eventPayload, &occurredAt)
+		err := rows.Scan(&id, &eventID, &aggregateID, &eventType, &eventPayload, &occurredAt)
 		if err != nil {
 			return nil, err
 		}
 
-		occurredOnTime, err := time.Parse(time.DateTime, occurredAt)
+		// Values are written in UTC (see Append), so read them back in UTC
+		// to guarantee a timezone-stable round-trip.
+		occurredOnTime, err := time.ParseInLocation(time.DateTime, occurredAt, time.UTC)
 		if err != nil {
 			return nil, err
 		}
 
 		uuidEventID := uuid.UUID{}
-		err = uuidEventID.UnmarshalBinary(eventID)
-		if err != nil {
+		if err := uuidEventID.UnmarshalBinary(eventID); err != nil {
+			return nil, err
+		}
+
+		uuidAggregateID := uuid.UUID{}
+		if err := uuidAggregateID.UnmarshalBinary(aggregateID); err != nil {
 			return nil, err
 		}
 
 		events = append(events, eventstore.StoredEvent{
 			IncrementID: id,
 			ID:          uuidEventID,
-			EntityID:    uuid.FromStringOrNil(aggregateId),
+			EntityID:    uuidAggregateID,
 			EventType:   eventType,
 			Payload:     eventPayload,
 			OccurredAt:  occurredOnTime,
