@@ -18,10 +18,11 @@ The required tables are defined in [`sql/mysql/schema.sql`](sql/mysql/schema.sql
 
 ## Examples
 
-Start a local MySQL instance:
+Start a local MySQL instance and wait until it is healthy (MySQL needs ~30 s to
+initialize on first boot):
 
 ```sh
-docker compose up -d
+docker compose up --wait
 ```
 
 Then run any example from this directory:
