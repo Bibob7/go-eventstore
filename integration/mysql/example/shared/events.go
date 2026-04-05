@@ -17,8 +17,15 @@ type OrderPlaced struct {
 }
 
 func NewOrderPlaced(customerID, product string, amount int) *OrderPlaced {
-	id, _ := uuid.NewV4()
-	orderID, _ := uuid.NewV4()
+	id, err := uuid.NewV4()
+	if err != nil {
+		panic("shared.NewOrderPlaced: failed to generate event UUID: " + err.Error())
+	}
+
+	orderID, err := uuid.NewV4()
+	if err != nil {
+		panic("shared.NewOrderPlaced: failed to generate order UUID: " + err.Error())
+	}
 	return &OrderPlaced{
 		EventID:    id,
 		OrderID:    orderID,
