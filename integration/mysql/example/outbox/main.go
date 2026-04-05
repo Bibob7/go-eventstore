@@ -52,13 +52,10 @@ func run() error {
 		return fmt.Errorf("create orders table: %w", err)
 	}
 
-	bundle, err := mysqlstore.NewEventStoreBundle(db, mysqlstore.Config{
+	bundle := mysqlstore.NewEventStoreBundle(db, mysqlstore.Config{
 		OutboxTableName:      "outbox",
 		IncrementIDTableName: "event_increment_id",
 	})
-	if err != nil {
-		return fmt.Errorf("create bundle: %w", err)
-	}
 
 	ctx := context.Background()
 
