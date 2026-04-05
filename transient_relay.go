@@ -54,21 +54,36 @@ func (t *transientRelay) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to fetch events: %w", err)
 	}
 
+	processed := make([]StoredEvent, 0, len(events))
 	for _, event := range events {
 		for _, handler := range t.handler {
 			if err := t.handleEvent(ctx, event, handler); err != nil {
-				return err
+				return t.cleanUp(ctx, processed, err)
 			}
 		}
 
-		if err := t.store.CleanUpEvents(ctx, []StoredEvent{event}); err != nil {
-			return fmt.Errorf("failed to clean up event %s: %w", event.ID, err)
-		}
+		processed = append(processed, event)
 
 		if err := t.waitHandleDelay(ctx); err != nil {
-			return err
+			return t.cleanUp(ctx, processed, err)
 		}
 	}
 
-	return nil
+	return t.cleanUp(ctx, processed, nil)
+}
+
+// cleanUp removes all successfully processed events in a single batch. If a
+// previous error occurred it is returned; a clean-up error is only returned
+// when there was no prior error, so the original cause is not hidden.
+func (t *transientRelay) cleanUp(ctx context.Context, processed []StoredEvent, prevErr error) error {
+	if len(processed) == 0 {
+		return prevErr
+	}
+	if err := t.store.CleanUpEvents(ctx, processed); err != nil {
+		if prevErr != nil {
+			return prevErr
+		}
+		return fmt.Errorf("failed to clean up events: %w", err)
+	}
+	return prevErr
 }

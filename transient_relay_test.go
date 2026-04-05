@@ -174,19 +174,94 @@ func TestTransientRelay_Run(t *testing.T) {
 	}
 }
 
-func TestTransientRelay_CleansUpEachEventIndividually(t *testing.T) {
-	events := []StoredEvent{newStoredEvent(1), newStoredEvent(2)}
-	store := &mockCleanUpStore{events: events}
-	relay := NewTransientRelay("r", store)
-	relay.RegisterHandler(&mockHandler{})
+func TestTransientRelay_CleansUpEventsAsBatch(t *testing.T) {
+	tests := []struct {
+		name            string
+		events          []StoredEvent
+		handlerErr      error
+		failOnNthHandle int // 1-based; 0 means never fail
+		wantErr         bool
+		wantCleanUpLens []int // expected lengths of each CleanUpEvents call
+	}{
+		{
+			name:            "all events cleaned up in a single call",
+			events:          []StoredEvent{newStoredEvent(1), newStoredEvent(2), newStoredEvent(3)},
+			wantCleanUpLens: []int{3},
+		},
+		{
+			name:            "empty batch does not invoke clean up",
+			events:          nil,
+			wantCleanUpLens: nil,
+		},
+		{
+			name:            "partial batch cleaned up when handler fails mid-way",
+			events:          []StoredEvent{newStoredEvent(1), newStoredEvent(2), newStoredEvent(3)},
+			handlerErr:      errors.New("boom"),
+			failOnNthHandle: 3,
+			wantErr:         true,
+			wantCleanUpLens: []int{2},
+		},
+		{
+			name:            "no clean up call when first event already fails",
+			events:          []StoredEvent{newStoredEvent(1), newStoredEvent(2)},
+			handlerErr:      errors.New("boom"),
+			failOnNthHandle: 1,
+			wantErr:         true,
+			wantCleanUpLens: nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &recordingCleanUpStore{mockCleanUpStore: mockCleanUpStore{events: tc.events}}
+			h := &countingHandler{err: tc.handlerErr, failOnCall: tc.failOnNthHandle}
+			relay := NewTransientRelay("r", store)
+			relay.RegisterHandler(h)
 
-	if err := relay.Run(context.Background()); err != nil {
-		t.Fatalf("expected no error, got %v", err)
+			err := relay.Run(context.Background())
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("wantErr=%v, got %v", tc.wantErr, err)
+			}
+			if len(store.calls) != len(tc.wantCleanUpLens) {
+				t.Fatalf("expected %d CleanUpEvents call(s), got %d", len(tc.wantCleanUpLens), len(store.calls))
+			}
+			for i, want := range tc.wantCleanUpLens {
+				if len(store.calls[i]) != want {
+					t.Errorf("call %d: expected %d events, got %d", i, want, len(store.calls[i]))
+				}
+			}
+		})
 	}
-	if len(store.cleanedUp) != 2 {
-		t.Fatalf("expected 2 individual clean ups, got %d", len(store.cleanedUp))
+}
+
+// countingHandler fails on the Nth Handle call (1-based) when failOnCall > 0,
+// and otherwise returns err on every call (or nil if err is nil).
+type countingHandler struct {
+	calls      int
+	err        error
+	failOnCall int
+}
+
+func (c *countingHandler) Name() string { return "counting-handler" }
+
+func (c *countingHandler) Handle(_ context.Context, _ StoredEvent) error {
+	c.calls++
+	if c.failOnCall == 0 {
+		return c.err
 	}
-	if store.cleanedUp[0].ID != events[0].ID || store.cleanedUp[1].ID != events[1].ID {
-		t.Error("clean-up order does not match event order")
+	if c.calls == c.failOnCall {
+		return c.err
 	}
+	return nil
+}
+
+// recordingCleanUpStore records every CleanUpEvents invocation so tests can
+// assert both the number of batch calls and the number of events per call.
+type recordingCleanUpStore struct {
+	mockCleanUpStore
+	calls [][]StoredEvent
+}
+
+func (r *recordingCleanUpStore) CleanUpEvents(ctx context.Context, events []StoredEvent) error {
+	r.calls = append(r.calls, append([]StoredEvent(nil), events...))
+	return r.mockCleanUpStore.CleanUpEvents(ctx, events)
 }
