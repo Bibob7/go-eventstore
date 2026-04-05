@@ -2,15 +2,15 @@ package filter
 
 import (
 	"context"
-	"slices"
+	"errors"
 	"testing"
 	"time"
-
-	"github.com/Bibob7/go-eventstore"
 
 	"github.com/gofrs/uuid/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+
+	"github.com/Bibob7/go-eventstore"
 )
 
 type mockGapDetector struct {
@@ -22,96 +22,109 @@ func (m *mockGapDetector) HasUncommittedID(ctx context.Context, lowerBound, uppe
 	return args.Bool(0), args.Error(1)
 }
 
-func createTestEvents(startID int64, count int, skipIDs []int64) []eventstore.StoredEvent {
-	var events []eventstore.StoredEvent
-	for incrementID := startID; len(events) < count; incrementID++ {
-		if slices.Contains(skipIDs, incrementID) {
-			continue
-		}
-		id, _ := uuid.NewV4()
-		events = append(events, eventstore.StoredEvent{
-			IncrementID: incrementID,
-			ID:          id,
-			EntityID:    id,
+func eventsWithIDs(ids ...int64) []eventstore.StoredEvent {
+	events := make([]eventstore.StoredEvent, len(ids))
+	for i, id := range ids {
+		uid, _ := uuid.NewV4()
+		events[i] = eventstore.StoredEvent{
+			IncrementID: id,
+			ID:          uid,
+			EntityID:    uid,
 			EventType:   "test_event",
 			Payload:     "{}",
 			OccurredAt:  time.Now(),
-		})
+		}
 	}
 	return events
 }
 
+func extractIDs(events []eventstore.StoredEvent) []int64 {
+	ids := make([]int64, len(events))
+	for i, e := range events {
+		ids[i] = e.IncrementID
+	}
+	return ids
+}
+
 func TestGapDetectionEventFilter_Execute(t *testing.T) {
-	ctx := context.Background()
+	sentinel := errors.New("detector error")
 
-	t.Run("no gaps in sequence", func(t *testing.T) {
-		detector := &mockGapDetector{}
-		filter := NewUntilGapEventFilter(0, detector)
+	tests := []struct {
+		name            string
+		lastIncrementID int64
+		events          []eventstore.StoredEvent
+		setupDetector   func(*mockGapDetector)
+		wantIDs         []int64
+		wantErr         error
+	}{
+		{
+			name:            "no gaps returns all events",
+			lastIncrementID: 0,
+			events:          eventsWithIDs(1, 2, 3),
+			setupDetector:   func(_ *mockGapDetector) {},
+			wantIDs:         []int64{1, 2, 3},
+		},
+		{
+			name:            "empty event list returns empty result",
+			lastIncrementID: 0,
+			events:          []eventstore.StoredEvent{},
+			setupDetector:   func(_ *mockGapDetector) {},
+			wantIDs:         []int64{},
+		},
+		{
+			name:            "gap with uncommitted ID stops before gap",
+			lastIncrementID: 1,
+			events:          eventsWithIDs(2, 3, 5, 6),
+			setupDetector: func(d *mockGapDetector) {
+				d.On("HasUncommittedID", mock.Anything, int64(4), int64(4)).Return(true, nil)
+			},
+			wantIDs: []int64{2, 3},
+		},
+		{
+			name:            "gap with committed ID continues past gap",
+			lastIncrementID: 1,
+			events:          eventsWithIDs(3, 4, 5),
+			setupDetector: func(d *mockGapDetector) {
+				d.On("HasUncommittedID", mock.Anything, int64(2), int64(2)).Return(false, nil)
+			},
+			wantIDs: []int64{3, 4, 5},
+		},
+		{
+			name:            "large gap with committed IDs continues past gap",
+			lastIncrementID: 0,
+			events:          eventsWithIDs(1, 2, 5000),
+			setupDetector: func(d *mockGapDetector) {
+				d.On("HasUncommittedID", mock.Anything, int64(3), int64(4999)).Return(false, nil)
+			},
+			wantIDs: []int64{1, 2, 5000},
+		},
+		{
+			name:            "detector error propagates and returns nil",
+			lastIncrementID: 1,
+			events:          eventsWithIDs(3),
+			setupDetector: func(d *mockGapDetector) {
+				d.On("HasUncommittedID", mock.Anything, int64(2), int64(2)).Return(false, sentinel)
+			},
+			wantErr: sentinel,
+		},
+	}
 
-		events := createTestEvents(1, 3, nil)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			detector := &mockGapDetector{}
+			tc.setupDetector(detector)
 
-		result, err := filter.Execute(ctx, events)
+			f := NewUntilGapEventFilter(tc.lastIncrementID, detector)
+			result, err := f.Execute(context.Background(), tc.events)
 
-		assert.NoError(t, err)
-		assert.Len(t, result, 3)
-		assert.Equal(t, events, result)
-		detector.AssertNumberOfCalls(t, "HasUncommittedID", 0)
-	})
-
-	t.Run("gap with uncommitted UserID", func(t *testing.T) {
-		detector := &mockGapDetector{}
-		filter := NewUntilGapEventFilter(1, detector)
-
-		events := createTestEvents(2, 4, []int64{4})
-		detector.On("HasUncommittedID", ctx, int64(4), int64(4)).Return(true, nil)
-
-		result, err := filter.Execute(ctx, events)
-
-		assert.NoError(t, err)
-		assert.Equal(t, int64(3), result[len(result)-1].IncrementID)
-		detector.AssertExpectations(t)
-	})
-
-	t.Run("gap with committed UserID", func(t *testing.T) {
-		detector := &mockGapDetector{}
-		filter := NewUntilGapEventFilter(1, detector)
-
-		events := createTestEvents(3, 3, nil)
-		detector.On("HasUncommittedID", ctx, int64(2), int64(2)).Return(false, nil)
-
-		result, err := filter.Execute(ctx, events)
-
-		assert.NoError(t, err)
-		assert.Len(t, result, 3)
-		assert.Equal(t, events, result)
-		assert.Equal(t, int64(5), result[len(result)-1].IncrementID)
-		detector.AssertExpectations(t)
-	})
-
-	t.Run("empty events list", func(t *testing.T) {
-		detector := &mockGapDetector{}
-		filter := NewUntilGapEventFilter(0, detector)
-
-		result, err := filter.Execute(ctx, []eventstore.StoredEvent{})
-
-		assert.NoError(t, err)
-		assert.Empty(t, result)
-		detector.AssertNotCalled(t, "HasUncommittedID")
-	})
-
-	t.Run("detector error", func(t *testing.T) {
-		detector := &mockGapDetector{}
-		filter := NewUntilGapEventFilter(1, detector)
-
-		events := createTestEvents(3, 1, nil)
-		expectedError := assert.AnError
-		detector.On("HasUncommittedID", ctx, int64(2), int64(2)).Return(false, expectedError)
-
-		result, err := filter.Execute(ctx, events)
-
-		assert.Error(t, err)
-		assert.ErrorIs(t, err, expectedError)
-		assert.Nil(t, result)
-		detector.AssertExpectations(t)
-	})
+			if tc.wantErr != nil {
+				assert.ErrorIs(t, err, tc.wantErr)
+				assert.Nil(t, result)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tc.wantIDs, extractIDs(result))
+			}
+			detector.AssertExpectations(t)
+		})
+	}
 }
