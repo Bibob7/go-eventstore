@@ -92,7 +92,7 @@ func (p *pointerRelay) RegisterHandler(handler ...Handler) Relay {
 	return p
 }
 
-func (p *pointerRelay) Run(ctx context.Context) error {
+func (p *pointerRelay) Run(ctx context.Context) (err error) {
 	lastIncrementID, err := p.incrementIDStore.GetIncrementID(ctx, p.name)
 	if err != nil {
 		return fmt.Errorf("failed to get last increment id: %w", err)
@@ -107,6 +107,16 @@ func (p *pointerRelay) Run(ctx context.Context) error {
 	}
 
 	var newLastIncrementID int64
+	defer func() {
+		if newLastIncrementID == 0 {
+			slog.Debug("No events relayed", "name", p.name, "last_increment_id", lastIncrementID)
+			return
+		}
+		if setErr := p.incrementIDStore.SetIncrementID(ctx, p.name, newLastIncrementID); setErr != nil && err == nil {
+			err = fmt.Errorf("failed to set new increment id: %w", setErr)
+		}
+	}()
+
 	for _, storedEvent := range storedEvents {
 		for _, handler := range p.handler {
 			if err = p.handleEvent(ctx, storedEvent, handler); err != nil {
@@ -114,18 +124,10 @@ func (p *pointerRelay) Run(ctx context.Context) error {
 			}
 		}
 		newLastIncrementID = storedEvent.IncrementID
-		if err := p.waitHandleDelay(ctx); err != nil {
+		if err = p.waitHandleDelay(ctx); err != nil {
 			return err
 		}
 	}
 
-	if newLastIncrementID == 0 {
-		slog.Debug("No events relayed", "name", p.name, "last_increment_id", lastIncrementID)
-		return nil
-	}
-
-	if err := p.incrementIDStore.SetIncrementID(ctx, p.name, newLastIncrementID); err != nil {
-		return fmt.Errorf("failed to set new increment id: %w", err)
-	}
 	return nil
 }
