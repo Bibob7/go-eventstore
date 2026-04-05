@@ -5,22 +5,22 @@ import (
 	"fmt"
 )
 
-type transitionalRelay struct {
+type transientRelay struct {
 	relayBase
 	store     CleanUpStore
 	batchSize int
 }
 
-// NewTransitionalRelay creates a Relay that fetches events from store, dispatches them
+// NewTransientRelay creates a Relay that fetches events from store, dispatches them
 // to registered handlers, and removes each event after successful handling.
 // The name must be unique and is used for logging. Options are shared with NewPointerRelay.
-func NewTransitionalRelay(name string, store CleanUpStore, opts ...RelayOption) Relay {
+func NewTransientRelay(name string, store CleanUpStore, opts ...RelayOption) Relay {
 	cfg := &relayConfig{batchSize: DefaultBatchSize}
 	for _, opt := range opts {
 		opt(cfg)
 	}
 
-	t := &transitionalRelay{
+	t := &transientRelay{
 		relayBase: relayBase{name: name, handleDelay: cfg.handleDelay},
 		store:     store,
 		batchSize: cfg.batchSize,
@@ -39,16 +39,16 @@ func NewTransitionalRelay(name string, store CleanUpStore, opts ...RelayOption) 
 	return relay
 }
 
-func (t *transitionalRelay) Name() string {
+func (t *transientRelay) Name() string {
 	return t.name
 }
 
-func (t *transitionalRelay) RegisterHandler(handler ...Handler) Relay {
+func (t *transientRelay) RegisterHandler(handler ...Handler) Relay {
 	t.handler = append(t.handler, handler...)
 	return t
 }
 
-func (t *transitionalRelay) Run(ctx context.Context) error {
+func (t *transientRelay) Run(ctx context.Context) error {
 	events, err := t.store.FetchBatchOfEvents(ctx, t.batchSize)
 	if err != nil {
 		return fmt.Errorf("failed to fetch events: %w", err)
