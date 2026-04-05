@@ -10,10 +10,10 @@ type EventStoreBundle struct {
 	IncrementIDStore *EventIncrementIDStore
 }
 
-// NewEventStoreBundle creates a MySQL connection and initializes event store infrastructure.
-func NewEventStoreBundle(db *sql.DB, cfg Config) (*EventStoreBundle, error) {
+// NewEventStoreBundle initializes a new EventStoreBundle with the given database connection and configuration.
+func NewEventStoreBundle(db *sql.DB, cfg Config) *EventStoreBundle {
 	return &EventStoreBundle{
 		EventStore:       NewEventStore(db, cfg.OutboxTableName),
 		IncrementIDStore: NewEventIncrementIDStore(db, cfg.IncrementIDTableName),
-	}, nil
+	}
 }
