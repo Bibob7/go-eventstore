@@ -13,7 +13,6 @@ type Store interface {
 // CleanUpStore extends Store with the ability to fetch and remove
 // already-processed events, for use in outbox cleanup patterns.
 type CleanUpStore interface {
-	Store
 	// FetchBatchOfEvents returns up to limit events starting from the smallest IncrementID.
 	FetchBatchOfEvents(ctx context.Context, limit int) ([]StoredEvent, error)
 	// CleanUpEvents removes the given events from the store.
@@ -24,7 +23,6 @@ type CleanUpStore interface {
 // Implementations track a position (IncrementID) and return events after it,
 // enabling relay consumers to process events exactly once.
 type PointerStore interface {
-	Store
 	// FetchBatchOfEventsSince returns up to limit events with IncrementID greater
 	// than lastIncrementID, ordered by IncrementID ascending.
 	FetchBatchOfEventsSince(ctx context.Context, lastIncrementID int64, limit int) ([]StoredEvent, error)

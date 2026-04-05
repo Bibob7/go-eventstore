@@ -16,8 +16,6 @@ type mockCleanUpStore struct {
 	cleanedUp  []StoredEvent
 }
 
-func (m *mockCleanUpStore) Append(_ context.Context, _ ...DomainEvent) error { return nil }
-
 func (m *mockCleanUpStore) FetchBatchOfEvents(_ context.Context, limit int) ([]StoredEvent, error) {
 	if m.fetchErr != nil {
 		return nil, m.fetchErr
