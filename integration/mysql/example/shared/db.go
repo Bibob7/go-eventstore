@@ -14,17 +14,19 @@ func DSN() string {
 	if v := os.Getenv("MYSQL_DSN"); v != "" {
 		return v
 	}
-	return "eventstore:eventstore@tcp(localhost:3306)/eventstore_example?parseTime=true"
+	return "eventstore:eventstore@tcp(127.0.0.1:3306)/eventstore_example"
 }
 
 // WaitForDB retries db.Ping up to 15 times with one-second intervals.
 func WaitForDB(db *sql.DB) error {
-	for i := range 15 {
-		if err := db.Ping(); err == nil {
+	const retries = 15
+	var last error
+	for i := range retries {
+		if last = db.Ping(); last == nil {
 			return nil
 		}
-		fmt.Printf("waiting for database... (%d/15)\n", i+1)
+		fmt.Printf("waiting for database... (%d/%d): %v\n", i+1, retries, last)
 		time.Sleep(time.Second)
 	}
-	return db.Ping()
+	return last
 }
