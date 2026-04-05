@@ -3,7 +3,7 @@ module github.com/Bibob7/go-eventstore/integration/mysql
 go 1.26
 
 require (
-	github.com/Bibob7/go-eventstore v0.2.1
+	github.com/Bibob7/go-eventstore v0.3.0
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/gofrs/uuid/v5 v5.4.0
 	github.com/stretchr/testify v1.11.1
@@ -15,6 +15,3 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-// TODO: remove once changes are released
-replace github.com/Bibob7/go-eventstore => ../..
