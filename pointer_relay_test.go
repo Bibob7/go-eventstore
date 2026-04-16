@@ -62,6 +62,10 @@ type mockHandler struct {
 	handleCalled bool
 	handleEvents []StoredEvent
 	err          error
+	// failOnCall, when > 0, causes Handle to return err only on the Nth call
+	// (1-based). When 0, err is returned on every call.
+	failOnCall int
+	calls      int
 }
 
 func (m *mockHandler) Name() string {
@@ -71,7 +75,14 @@ func (m *mockHandler) Name() string {
 func (m *mockHandler) Handle(ctx context.Context, event StoredEvent) error {
 	m.handleCalled = true
 	m.handleEvents = append(m.handleEvents, event)
-	return m.err
+	m.calls++
+	if m.failOnCall == 0 {
+		return m.err
+	}
+	if m.calls == m.failOnCall {
+		return m.err
+	}
+	return nil
 }
 
 func newEvents(incrementIDs ...int64) []StoredEvent {
@@ -102,16 +113,17 @@ func TestPointerRelay_Name(t *testing.T) {
 
 func TestPointerRelay_Run(t *testing.T) {
 	tests := []struct {
-		name        string
-		events      []StoredEvent
-		fetchErr    error
-		getErr      error
-		setErr      error
-		handlerErr  error
-		opts        []RelayOption
-		wantErr     bool
-		wantHandled int
-		wantLastID  int64
+		name            string
+		events          []StoredEvent
+		fetchErr        error
+		getErr          error
+		setErr          error
+		handlerErr      error
+		failOnNthHandle int
+		opts            []RelayOption
+		wantErr         bool
+		wantHandled     int
+		wantLastID      int64
 	}{
 		{
 			name:        "no events",
@@ -164,6 +176,15 @@ func TestPointerRelay_Run(t *testing.T) {
 			wantErr:     true,
 			wantHandled: 1,
 		},
+		{
+			name:            "partial progress saved when handler fails mid-batch",
+			events:          newEvents(1, 2, 3),
+			handlerErr:      errors.New("boom"),
+			failOnNthHandle: 3,
+			wantErr:         true,
+			wantHandled:     3,
+			wantLastID:      2,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -171,7 +192,7 @@ func TestPointerRelay_Run(t *testing.T) {
 			inc := newMockIncrementIDStore()
 			inc.getErr = tc.getErr
 			inc.setErr = tc.setErr
-			h := &mockHandler{err: tc.handlerErr}
+			h := &mockHandler{err: tc.handlerErr, failOnCall: tc.failOnNthHandle}
 			relay := NewPointerRelay("test-processor", store, inc, tc.opts...)
 			relay.RegisterHandler(h)
 

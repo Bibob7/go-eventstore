@@ -5,14 +5,30 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 )
 
 // relayBase holds common state and logic shared across relay implementations.
 type relayBase struct {
 	name        string
+	mu          sync.RWMutex
 	handler     []Handler
 	handleDelay time.Duration
+}
+
+func (b *relayBase) registerHandler(handler ...Handler) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.handler = append(b.handler, handler...)
+}
+
+func (b *relayBase) handlers() []Handler {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	snapshot := make([]Handler, len(b.handler))
+	copy(snapshot, b.handler)
+	return snapshot
 }
 
 func (b *relayBase) handleEvent(ctx context.Context, event StoredEvent, h Handler) error {
@@ -33,11 +49,13 @@ func (b *relayBase) waitHandleDelay(ctx context.Context) error {
 		return nil
 	}
 	slog.Debug("Delaying next event relay", "name", b.name, "delay", b.handleDelay)
+	timer := time.NewTimer(b.handleDelay)
+	defer timer.Stop()
 	select {
 	case <-ctx.Done():
 		slog.Debug("Context done, stopping relay", "name", b.name)
 		return ctx.Err()
-	case <-time.After(b.handleDelay):
+	case <-timer.C:
 		return nil
 	}
 }

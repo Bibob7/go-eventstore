@@ -88,9 +88,23 @@ func (s *EventStore) Append(ctx context.Context, domainEvents ...eventstore.Doma
 }
 
 // FetchBatchOfEvents fetches a batch of events from the event store starting with the smallest incrementID.
-// Providing eventIDs is optional.
+// Unlike FetchBatchOfEventsSince, no gap detection is applied because this method is intended for
+// transient relay usage where processed events are deleted, making ID gaps expected and harmless.
 func (s *EventStore) FetchBatchOfEvents(ctx context.Context, limit int) ([]eventstore.StoredEvent, error) {
-	return s.FetchBatchOfEventsSince(ctx, -1, limit)
+	// #nosec G201 -- tableName is validated in the constructor.
+	selectStmt := fmt.Sprintf(
+		"SELECT id, event_id, aggregate_id, event_type, payload, occurred_at FROM %s ORDER BY id ASC LIMIT ?",
+		s.tableName)
+	rows, err := s.db.QueryContext(ctx, selectStmt, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err := rows.Close(); err != nil {
+			slog.Error("failed to close rows", "error", err)
+		}
+	}()
+	return s.transformToStoredEvents(rows)
 }
 
 // FetchBatchOfEventsSince fetches a batch of events from the event store since the last incrementID.
