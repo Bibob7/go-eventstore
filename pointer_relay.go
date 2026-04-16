@@ -106,9 +106,12 @@ func (p *pointerRelay) Run(ctx context.Context) (err error) {
 		return nil
 	}
 
-	var newLastIncrementID int64
+	var (
+		newLastIncrementID int64
+		processed          bool
+	)
 	defer func() {
-		if newLastIncrementID == 0 {
+		if !processed {
 			slog.Debug("No events relayed", "name", p.name, "last_increment_id", lastIncrementID)
 			return
 		}
@@ -124,6 +127,7 @@ func (p *pointerRelay) Run(ctx context.Context) (err error) {
 			}
 		}
 		newLastIncrementID = storedEvent.IncrementID
+		processed = true
 		if err = p.waitHandleDelay(ctx); err != nil {
 			return err
 		}
