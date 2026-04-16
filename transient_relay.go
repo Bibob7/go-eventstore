@@ -44,7 +44,7 @@ func (t *transientRelay) Name() string {
 }
 
 func (t *transientRelay) RegisterHandler(handler ...Handler) Relay {
-	t.handler = append(t.handler, handler...)
+	t.registerHandler(handler...)
 	return t
 }
 
@@ -65,7 +65,7 @@ func (t *transientRelay) Run(ctx context.Context) (err error) {
 	}()
 
 	for _, event := range events {
-		for _, handler := range t.handler {
+		for _, handler := range t.handlers() {
 			if err = t.handleEvent(ctx, event, handler); err != nil {
 				return err
 			}

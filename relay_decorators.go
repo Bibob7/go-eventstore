@@ -39,11 +39,13 @@ func (r delayedRelay) Run(ctx context.Context) error {
 	}
 	if errors.Is(err, ErrEventNotReadyToProcess) {
 		slog.Info("Events relayed, delaying next batch because of ErrEventNotReadyToProcess", "name", r.relay.Name(), "wait_time", r.waitTime)
+		timer := time.NewTimer(r.waitTime)
+		defer timer.Stop()
 		select {
 		case <-ctx.Done():
 			slog.Debug("Context done, stopping delayed relay", "name", r.relay.Name())
 			return ctx.Err()
-		case <-time.After(r.waitTime):
+		case <-timer.C:
 			return nil
 		}
 	}
@@ -75,11 +77,16 @@ func (r batchDelayedRelay) RegisterHandler(handler ...Handler) Relay {
 func (r batchDelayedRelay) Run(ctx context.Context) error {
 	err := r.relay.Run(ctx)
 	slog.Debug("Delaying next batch", "name", r.relay.Name(), "batch_delay", r.batchDelay)
+	timer := time.NewTimer(r.batchDelay)
+	defer timer.Stop()
 	select {
 	case <-ctx.Done():
 		slog.Debug("Context done, stopping batch delayed relay", "name", r.relay.Name())
+		if err != nil {
+			return err
+		}
 		return ctx.Err()
-	case <-time.After(r.batchDelay):
+	case <-timer.C:
 	}
 	return err
 }

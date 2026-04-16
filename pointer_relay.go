@@ -88,7 +88,7 @@ func (p *pointerRelay) Name() string {
 }
 
 func (p *pointerRelay) RegisterHandler(handler ...Handler) Relay {
-	p.handler = append(p.handler, handler...)
+	p.registerHandler(handler...)
 	return p
 }
 
@@ -121,7 +121,7 @@ func (p *pointerRelay) Run(ctx context.Context) (err error) {
 	}()
 
 	for _, storedEvent := range storedEvents {
-		for _, handler := range p.handler {
+		for _, handler := range p.handlers() {
 			if err = p.handleEvent(ctx, storedEvent, handler); err != nil {
 				return err
 			}
