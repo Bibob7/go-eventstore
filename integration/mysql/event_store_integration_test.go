@@ -232,6 +232,56 @@ func TestEventStore_GapDetection_RepeatableAttemptAfterCommit(t *testing.T) {
 	require.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 10, 12}, fetchIDs(secondEvents), "after commit: all events visible")
 }
 
+// TestEventStore_GapDetection_WithConcurrentTransactions verifies that a later
+// committed event with a higher auto-increment ID remains hidden while an
+// earlier transaction still holds the lower ID uncommitted.
+func TestEventStore_GapDetection_WithConcurrentTransactions(t *testing.T) {
+	db := openTestDB(t)
+	defer func() { _ = db.Close() }()
+	ensureOutboxTable(t, db)
+
+	store := NewEventStore(db, outboxTable)
+	ctx := context.Background()
+
+	tx1, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer func() { _ = tx1.Rollback() }()
+
+	firstEvent := &testEvent{
+		EventID:     mustUUID(t),
+		AggregateId: mustUUID(t),
+		Payload:     "first",
+		OccurredOn:  time.Now(),
+	}
+	require.NoError(t, store.Append(WithTx(ctx, tx1), firstEvent))
+
+	tx2, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer func() { _ = tx2.Rollback() }()
+
+	secondEvent := &testEvent{
+		EventID:     mustUUID(t),
+		AggregateId: mustUUID(t),
+		Payload:     "second",
+		OccurredOn:  time.Now(),
+	}
+	require.NoError(t, store.Append(WithTx(ctx, tx2), secondEvent))
+	require.NoError(t, tx2.Commit())
+
+	blockedEvents, err := store.FetchBatchOfEventsSince(ctx, 0, 10)
+	require.NoError(t, err)
+	require.Empty(t, blockedEvents, "the committed higher increment ID must stay hidden behind the uncommitted gap")
+
+	require.NoError(t, tx1.Commit())
+
+	eventsAfterCommit, err := store.FetchBatchOfEventsSince(ctx, 0, 10)
+	require.NoError(t, err)
+	require.Len(t, eventsAfterCommit, 2)
+	require.Equal(t, []int64{1, 2}, fetchIDs(eventsAfterCommit))
+	require.Equal(t, firstEvent.ID(), eventsAfterCommit[0].ID)
+	require.Equal(t, secondEvent.ID(), eventsAfterCommit[1].ID)
+}
+
 // testEvent is a minimal DomainEvent implementation for round-trip tests.
 type testEvent struct {
 	EventID     uuid.UUID `json:"event_id"`
@@ -244,6 +294,13 @@ func (e *testEvent) ID() uuid.UUID          { return e.EventID }
 func (e *testEvent) AggregateID() uuid.UUID { return e.AggregateId }
 func (e *testEvent) EventType() string      { return "test.event" }
 func (e *testEvent) OccurredAt() time.Time  { return e.OccurredOn }
+
+func mustUUID(t *testing.T) uuid.UUID {
+	t.Helper()
+	id, err := uuid.NewV4()
+	require.NoError(t, err)
+	return id
+}
 
 // TestEventStore_AppendFetchRoundTrip verifies that Append followed by
 // FetchBatchOfEventsSince preserves all fields, including the aggregate ID
