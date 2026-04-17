@@ -22,13 +22,18 @@ var (
 	// Handlers should return this error to indicate a temporary condition;
 	// the relay will pause before retrying rather than treating it as a hard failure.
 	ErrEventNotReadyToProcess = errors.New("event not ready to process")
+	// ErrIncrementIDConflict signals that a stored increment ID changed between
+	// read and write, so the caller's expected previous value is no longer current.
+	ErrIncrementIDConflict = errors.New("increment id conflict")
 )
 
 // IncrementIDStore persists the last successfully processed IncrementID per relay.
 // It is used to resume event processing after a restart without re-processing events.
 type IncrementIDStore interface {
 	// SetIncrementID stores the last processed IncrementID for the given consumer.
-	SetIncrementID(ctx context.Context, consumerName string, incrementID int64) error
+	// Implementations must reject the write with ErrIncrementIDConflict when the
+	// currently stored value differs from expectedPreviousID.
+	SetIncrementID(ctx context.Context, consumerName string, expectedPreviousID int64, incrementID int64) error
 	// GetIncrementID returns the last processed IncrementID for the given consumer,
 	// or 0 if no position has been recorded yet.
 	GetIncrementID(ctx context.Context, consumerName string) (int64, error)
@@ -115,7 +120,7 @@ func (p *pointerRelay) Run(ctx context.Context) (err error) {
 			slog.Debug("No events relayed", "name", p.name, "last_increment_id", lastIncrementID)
 			return
 		}
-		if setErr := p.incrementIDStore.SetIncrementID(ctx, p.name, newLastIncrementID); setErr != nil && err == nil {
+		if setErr := p.incrementIDStore.SetIncrementID(ctx, p.name, lastIncrementID, newLastIncrementID); setErr != nil && err == nil {
 			err = fmt.Errorf("failed to set new increment id: %w", setErr)
 		}
 	}()

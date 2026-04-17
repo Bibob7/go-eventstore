@@ -35,6 +35,7 @@ type mockIncrementIDStore struct {
 	incrementIDs map[string]int64
 	getErr       error
 	setErr       error
+	setHook      func(consumerName string)
 }
 
 func newMockIncrementIDStore() *mockIncrementIDStore {
@@ -50,9 +51,15 @@ func (m *mockIncrementIDStore) GetIncrementID(ctx context.Context, consumerName 
 	return m.incrementIDs[consumerName], nil
 }
 
-func (m *mockIncrementIDStore) SetIncrementID(ctx context.Context, consumerName string, incrementID int64) error {
+func (m *mockIncrementIDStore) SetIncrementID(ctx context.Context, consumerName string, expectedPreviousID int64, incrementID int64) error {
 	if m.setErr != nil {
 		return m.setErr
+	}
+	if m.setHook != nil {
+		m.setHook(consumerName)
+	}
+	if m.incrementIDs[consumerName] != expectedPreviousID {
+		return ErrIncrementIDConflict
 	}
 	m.incrementIDs[consumerName] = incrementID
 	return nil
@@ -255,6 +262,22 @@ func TestPointerRelay_MultipleHandlers(t *testing.T) {
 				t.Errorf("expected last increment ID %d, got %d", tc.wantLastID, lastID)
 			}
 		})
+	}
+}
+
+func TestPointerRelay_IncrementIDConflictPropagates(t *testing.T) {
+	store := &mockPointerStore{events: newEvents(1)}
+	inc := newMockIncrementIDStore()
+	inc.setHook = func(consumerName string) {
+		inc.incrementIDs[consumerName] = 99
+	}
+	h := &mockHandler{}
+	relay := NewPointerRelay("test-processor", store, inc)
+	relay.RegisterHandler(h)
+
+	err := relay.Run(context.Background())
+	if err == nil || !errors.Is(err, ErrIncrementIDConflict) {
+		t.Fatalf("expected ErrIncrementIDConflict, got %v", err)
 	}
 }
 
