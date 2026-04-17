@@ -128,7 +128,7 @@ relay.RegisterHandler(&NotifyHandler{})
 
 **PointerStore** — fetches events since a given `IncrementID`. The MySQL implementation applies gap detection to avoid delivering events out of order while concurrent transactions are in-flight.
 
-**IncrementIDStore** — persists the last successfully processed position per relay, enabling resumption after restarts.
+**IncrementIDStore** — persists the last successfully processed position per relay, enabling resumption after restarts. `SetIncrementID` uses an expected previous value so implementations can enforce optimistic locking.
 
 **CleanUpStore** — used by `TransientRelay` to fetch and remove already-processed events.
 
