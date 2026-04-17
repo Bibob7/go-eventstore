@@ -4,6 +4,8 @@ github.com/Bibob7/go-eventstore v0.3.0 h1:MdG3GlijaaXquMhWGlky/niyq5DBjOYY/GPY3M
 github.com/Bibob7/go-eventstore v0.3.0/go.mod h1:FmtIeZsdOJvCg8htd304Y53tN3WDFyFV5/OIryFVkAg=
 github.com/Bibob7/go-eventstore v0.4.0 h1:iN7R3chvSpRYeYf+DNrQkHZwNnJgdtq0Bfz8tk5TrwA=
 github.com/Bibob7/go-eventstore v0.4.0/go.mod h1:FmtIeZsdOJvCg8htd304Y53tN3WDFyFV5/OIryFVkAg=
+github.com/Bibob7/go-eventstore v0.5.0 h1:G/0o5oX21gbIGpmJ95Xn+hubiTWrZuwBY6Q/rI9+LnU=
+github.com/Bibob7/go-eventstore v0.5.0/go.mod h1:FmtIeZsdOJvCg8htd304Y53tN3WDFyFV5/OIryFVkAg=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/go-sql-driver/mysql v1.9.3 h1:U/N249h2WzJ3Ukj8SowVFjdtZKfu9vlLZxjPXV1aweo=
