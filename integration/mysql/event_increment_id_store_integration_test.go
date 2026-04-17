@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -85,4 +86,94 @@ func TestEventIncrementIDStore_SetIncrementID_Conflict(t *testing.T) {
 	incrementID, getErr := store.GetIncrementID(ctx, "relay-a")
 	require.NoError(t, getErr)
 	require.Equal(t, int64(10), incrementID)
+}
+
+func TestEventIncrementIDStore_SetIncrementID_NoOp(t *testing.T) {
+	db := openTestDB(t)
+	defer func() { _ = db.Close() }()
+	ensureIncrementIDTable(t, db)
+
+	store := NewEventIncrementIDStore(db, incrementIDTable)
+	ctx := context.Background()
+
+	err := store.SetIncrementID(ctx, "relay-a", 0, 10)
+	require.NoError(t, err)
+
+	err = store.SetIncrementID(ctx, "relay-a", 10, 10)
+	require.NoError(t, err)
+
+	incrementID, getErr := store.GetIncrementID(ctx, "relay-a")
+	require.NoError(t, getErr)
+	require.Equal(t, int64(10), incrementID)
+}
+
+func TestEventIncrementIDStore_SetIncrementID_MissingRowWithNonZeroExpectedConflict(t *testing.T) {
+	db := openTestDB(t)
+	defer func() { _ = db.Close() }()
+	ensureIncrementIDTable(t, db)
+
+	store := NewEventIncrementIDStore(db, incrementIDTable)
+
+	err := store.SetIncrementID(context.Background(), "relay-a", 10, 11)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, eventstore.ErrIncrementIDConflict))
+
+	incrementID, getErr := store.GetIncrementID(context.Background(), "relay-a")
+	require.NoError(t, getErr)
+	require.Equal(t, int64(0), incrementID)
+}
+
+func TestEventIncrementIDStore_SetIncrementID_ConcurrentConflict(t *testing.T) {
+	db := openTestDB(t)
+	defer func() { _ = db.Close() }()
+	ensureIncrementIDTable(t, db)
+
+	store := NewEventIncrementIDStore(db, incrementIDTable)
+	ctx := context.Background()
+
+	err := store.SetIncrementID(ctx, "relay-a", 0, 10)
+	require.NoError(t, err)
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var wg sync.WaitGroup
+
+	runWriter := func(nextID int64) {
+		defer wg.Done()
+		<-start
+		results <- store.SetIncrementID(ctx, "relay-a", 10, nextID)
+	}
+
+	wg.Add(2)
+	go runWriter(11)
+	go runWriter(12)
+
+	close(start)
+	wg.Wait()
+	close(results)
+
+	var errs []error
+	for err := range results {
+		errs = append(errs, err)
+	}
+
+	require.Len(t, errs, 2)
+
+	successes := 0
+	conflicts := 0
+	for _, err := range errs {
+		if err == nil {
+			successes++
+			continue
+		}
+		require.True(t, errors.Is(err, eventstore.ErrIncrementIDConflict))
+		conflicts++
+	}
+
+	require.Equal(t, 1, successes)
+	require.Equal(t, 1, conflicts)
+
+	incrementID, getErr := store.GetIncrementID(ctx, "relay-a")
+	require.NoError(t, getErr)
+	require.Contains(t, []int64{11, 12}, incrementID)
 }
