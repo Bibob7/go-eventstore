@@ -1,7 +1,7 @@
-// outbox demonstrates the transactional outbox pattern:
-// a business operation (placing an order) and its domain event are written
-// to the database in a single transaction. A TransientRelay then picks up
-// the event from the outbox and "publishes" it (here: prints it).
+// outbox demonstrates why gap detection is needed for a transactional outbox:
+// two concurrent repository writes append events in separate transactions, but
+// the slower transaction keeps the smaller auto-increment ID uncommitted long
+// enough for the faster transaction to commit behind it.
 //
 // Run with:
 //
@@ -12,18 +12,24 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log"
 	"log/slog"
 	"os"
+	"sync"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 
-	eventstore "github.com/Bibob7/go-eventstore"
-	mysqlstore "github.com/Bibob7/go-eventstore/integration/mysql"
+	"github.com/Bibob7/go-eventstore"
+	"github.com/Bibob7/go-eventstore/integration/mysql"
 
 	"github.com/Bibob7/go-eventstore/integration/mysql/example/shared"
+)
+
+const (
+	slowTransactionDelay = 2 * time.Second
+	fastTransactionDelay = 200 * time.Millisecond
 )
 
 func main() {
@@ -48,79 +54,83 @@ func run() error {
 		return fmt.Errorf("db not ready: %w", err)
 	}
 
-	if err := createOrdersTable(db); err != nil {
-		return fmt.Errorf("create orders table: %w", err)
+	if err := prepareDemoTables(db); err != nil {
+		return fmt.Errorf("prepare demo tables: %w", err)
 	}
 
-	bundle := mysqlstore.NewEventStoreBundle(db, mysqlstore.Config{
-		OutboxTableName:      "outbox",
-		IncrementIDTableName: "event_increment_id",
-	})
+	store := mysql.NewEventStore(db, "outbox")
+	repo := &orderRepository{db: db, eventStore: store}
 
 	ctx := context.Background()
+	slowInserted := make(chan struct{})
+	fastInserted := make(chan struct{})
+	fastCommitted := make(chan struct{})
 
-	// --- Step 1: Place an order atomically ---
-	// Both the orders row and the domain event land in the DB in one transaction.
-	// If either fails, neither is persisted – guaranteed by the database.
-	fmt.Println("=== Step 1: Place order (transactional outbox write) ===")
+	slowOrder := newOrder(shared.NewOrderPlaced("alice", "keyboard", 1))
+	fastOrder := newOrder(shared.NewOrderPlaced("bob", "monitor", 2))
 
-	event := shared.NewOrderPlaced("alice", "keyboard", 1)
-
-	err = mysqlstore.WithTransaction(ctx, db, func(tx *sql.Tx) error {
-		// business state change
-		_, err := tx.ExecContext(ctx,
-			"INSERT INTO orders (id, customer_id, product, amount) VALUES (?, ?, ?, ?)",
-			event.AggregateID().String(), event.CustomerID, event.Product, event.Amount,
-		)
-		if err != nil {
-			return fmt.Errorf("insert order: %w", err)
-		}
-
-		// domain event – same transaction
-		txCtx := mysqlstore.WithTx(ctx, tx)
-		return bundle.EventStore.Append(txCtx, event)
-	}, nil)
-	if err != nil {
-		return fmt.Errorf("place order: %w", err)
-	}
-	fmt.Printf("  order %s placed, event %s written to outbox\n", event.AggregateID(), event.ID())
-
-	// --- Step 2: Relay picks up the event and "publishes" it ---
-	fmt.Println("\n=== Step 2: TransientRelay processes outbox and cleans up ===")
-
-	relay := eventstore.NewTransientRelay("outbox-publisher", bundle.EventStore,
-		eventstore.WithBatchSize(50),
+	var (
+		wg   sync.WaitGroup
+		errs = make(chan error, 2)
 	)
-	relay.RegisterHandler(&printHandler{})
 
-	if err := relay.Run(ctx); err != nil {
-		return fmt.Errorf("relay run: %w", err)
+	fmt.Println("=== Step 1: Run two transactional repository writes concurrently ===")
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		fmt.Printf("  [slow] start order=%s hold=%s\n", slowOrder.ID, slowTransactionDelay)
+		errs <- repo.Persist(ctx, slowOrder, slowTransactionDelay, func() {
+			fmt.Println("  [slow] business row + outbox event inserted, transaction still open")
+			close(slowInserted)
+		})
+	}()
+
+	<-slowInserted
+
+	go func() {
+		defer wg.Done()
+		fmt.Printf("  [fast] start order=%s hold=%s\n", fastOrder.ID, fastTransactionDelay)
+		errs <- repo.Persist(ctx, fastOrder, fastTransactionDelay, func() {
+			fmt.Println("  [fast] business row + outbox event inserted, transaction still open")
+			close(fastInserted)
+		})
+		close(fastCommitted)
+	}()
+
+	<-fastInserted
+	<-fastCommitted
+
+	fmt.Println("\n=== Step 2: Fetch while the lower increment ID is still uncommitted ===")
+	blockedEvents, err := store.FetchBatchOfEventsSince(ctx, 0, 10)
+	if err != nil {
+		return fmt.Errorf("fetch before commit: %w", err)
+	}
+	printEvents("before slow commit", blockedEvents)
+
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			return err
+		}
 	}
 
-	fmt.Println("\nOutbox is now empty – the event was consumed and deleted.")
+	fmt.Println("\n=== Step 3: Fetch again after both transactions committed ===")
+	visibleEvents, err := store.FetchBatchOfEventsSince(ctx, 0, 10)
+	if err != nil {
+		return fmt.Errorf("fetch after commit: %w", err)
+	}
+	printEvents("after both commits", visibleEvents)
+
+	fmt.Println("\nDone. The first fetch stops at the gap; the second sees both events in order.")
 	return nil
 }
 
-// printHandler prints every event it receives, simulating a message broker publish.
-type printHandler struct{}
-
-func (h *printHandler) Name() string { return "print-publisher" }
-
-func (h *printHandler) Handle(_ context.Context, e eventstore.StoredEvent) error {
-	var payload map[string]any
-	_ = json.Unmarshal([]byte(e.Payload), &payload)
-	fmt.Printf("  [published] type=%s id=%s payload=%v\n", e.EventType, e.ID, payload)
-	return nil
-}
-
-func createOrdersTable(db *sql.DB) error {
-	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS orders (
-		id          VARCHAR(36)  NOT NULL,
-		customer_id VARCHAR(255) NOT NULL,
-		product     VARCHAR(255) NOT NULL,
-		amount      INT          NOT NULL,
-		created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		PRIMARY KEY (id)
-	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
-	return err
+func printEvents(label string, events []eventstore.StoredEvent) {
+	fmt.Printf("  [%s] fetched %d event(s)\n", label, len(events))
+	for _, event := range events {
+		fmt.Printf("    increment_id=%d type=%s aggregate_id=%s\n",
+			event.IncrementID, event.EventType, event.EntityID)
+	}
 }
