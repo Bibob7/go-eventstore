@@ -14,7 +14,7 @@ The required tables are defined in [`sql/mysql/schema.sql`](sql/mysql/schema.sql
 | Table | Purpose |
 |---|---|
 | `outbox` | Stores domain events before they are relayed |
-| `event_increment_id` | Persists the last processed position per relay consumer |
+| `event_increment_id` | Persists the last processed position per relay consumer with optimistic locking support |
 
 ## Examples
 
