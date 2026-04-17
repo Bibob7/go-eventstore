@@ -108,7 +108,6 @@ func (s *EventStore) FetchBatchOfEvents(ctx context.Context, limit int) ([]event
 }
 
 // FetchBatchOfEventsSince fetches a batch of events from the event store since the last incrementID.
-// Providing eventIDs is optional.
 func (s *EventStore) FetchBatchOfEventsSince(ctx context.Context, lastIncrementID int64, limit int) ([]eventstore.StoredEvent, error) {
 	// #nosec G201 -- tableName is validated in the constructor.
 	selectStmt := fmt.Sprintf(
