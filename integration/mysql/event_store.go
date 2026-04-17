@@ -91,30 +91,32 @@ func (s *EventStore) Append(ctx context.Context, domainEvents ...eventstore.Doma
 // Unlike FetchBatchOfEventsSince, no gap detection is applied because this method is intended for
 // transient relay usage where processed events are deleted, making ID gaps expected and harmless.
 func (s *EventStore) FetchBatchOfEvents(ctx context.Context, limit int) ([]eventstore.StoredEvent, error) {
-	// #nosec G201 -- tableName is validated in the constructor.
-	selectStmt := fmt.Sprintf(
-		"SELECT id, event_id, aggregate_id, event_type, payload, occurred_at FROM %s ORDER BY id ASC LIMIT ?",
-		s.tableName)
-	rows, err := s.db.QueryContext(ctx, selectStmt, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if err := rows.Close(); err != nil {
-			slog.Error("failed to close rows", "error", err)
-		}
-	}()
-	return s.transformToStoredEvents(rows)
+	return s.fetchBatchOfEvents(ctx, -1, limit)
 }
 
 // FetchBatchOfEventsSince fetches a batch of events from the event store since the last incrementID.
 func (s *EventStore) FetchBatchOfEventsSince(ctx context.Context, lastIncrementID int64, limit int) ([]eventstore.StoredEvent, error) {
+	storedEvents, err := s.fetchBatchOfEvents(ctx, lastIncrementID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return filter.NewUntilGapEventFilter(lastIncrementID, s).Execute(ctx, storedEvents)
+}
+
+func (s *EventStore) fetchBatchOfEvents(ctx context.Context, lastIncrementID int64, limit int) ([]eventstore.StoredEvent, error) {
 	// #nosec G201 -- tableName is validated in the constructor.
 	selectStmt := fmt.Sprintf(
-		"SELECT id, event_id, aggregate_id, event_type, payload, occurred_at FROM %s WHERE id > ? ORDER BY id ASC LIMIT ?",
+		"SELECT id, event_id, aggregate_id, event_type, payload, occurred_at FROM %s",
 		s.tableName)
+	queryArgs := []interface{}{limit}
+	if lastIncrementID >= 0 {
+		selectStmt += " WHERE id > ?"
+		queryArgs = []interface{}{lastIncrementID, limit}
+	}
+	selectStmt += " ORDER BY id ASC LIMIT ?"
 	slog.Debug("Fetching events from eventStore", "lastIncrementID", lastIncrementID, "limit", limit, "selectStmt", selectStmt)
-	rows, err := s.db.QueryContext(ctx, selectStmt, lastIncrementID, limit)
+
+	rows, err := s.db.QueryContext(ctx, selectStmt, queryArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -123,11 +125,8 @@ func (s *EventStore) FetchBatchOfEventsSince(ctx context.Context, lastIncrementI
 			slog.Error("failed to close rows", "error", err)
 		}
 	}()
-	storedEvents, err := s.transformToStoredEvents(rows)
-	if err != nil {
-		return nil, err
-	}
-	return filter.NewUntilGapEventFilter(lastIncrementID, s).Execute(ctx, storedEvents)
+
+	return s.transformToStoredEvents(rows)
 }
 
 // CleanUpEvents removes a list of stored events from the event store based on their IncrementID values.
