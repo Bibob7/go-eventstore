@@ -3,8 +3,8 @@ module github.com/Bibob7/go-eventstore/integration/mysql
 go 1.26
 
 require (
-	github.com/Bibob7/go-eventstore v0.5.0
-	github.com/go-sql-driver/mysql v1.9.3
+	github.com/Bibob7/go-eventstore v0.6.0
+	github.com/go-sql-driver/mysql v1.10.0
 	github.com/gofrs/uuid/v5 v5.4.0
 	github.com/stretchr/testify v1.11.1
 )
