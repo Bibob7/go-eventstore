@@ -30,11 +30,11 @@ type PointerStore interface {
 	FetchBatchOfEventsSince(ctx context.Context, lastIncrementID int64, limit int) ([]StoredEvent, error)
 }
 
-// CleanUpToIncludingStore removes all events with IncrementID <= a given
-// threshold in a single call. It is intended for outbox cleanup patterns
-// where, once a downstream consumer has acknowledged a position, every
-// event at or before that position can be discarded.
-type CleanUpToIncludingStore interface {
+// CleanUpToStore removes all events with IncrementID <= a given threshold
+// in a single call. It is intended for outbox cleanup patterns where, once
+// a downstream consumer has acknowledged a position, every event at or
+// before that position can be discarded.
+type CleanUpToStore interface {
 	// CleanUpToIncluding removes all events whose IncrementID is less than
 	// or equal to incrementID. The event with IncrementID == incrementID,
 	// if any, is also removed.
