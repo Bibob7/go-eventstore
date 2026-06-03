@@ -396,3 +396,71 @@ func TestEventStore_HasUncommittedCalledOnceForLargeGap(t *testing.T) {
 	require.Equal(t, []int64{1, 2, 10}, fetchIDs(filtered))
 	require.Equal(t, 1, det.calls, "HasUncommittedID should be called exactly once for the large gap")
 }
+
+// TestEventStore_CleanUpToIncluding verifies that CleanUpToIncluding removes
+// every event with IncrementID less than or equal to the given threshold,
+// including the threshold itself.
+func TestEventStore_CleanUpToIncluding(t *testing.T) {
+	tests := []struct {
+		name      string
+		seed      []int64
+		threshold int64
+		wantIDs   []int64
+	}{
+		{
+			name:      "removes everything up to and including threshold",
+			seed:      []int64{1, 2, 3, 4, 5},
+			threshold: 3,
+			wantIDs:   []int64{4, 5},
+		},
+		{
+			name:      "threshold equal to highest id removes everything",
+			seed:      []int64{1, 2, 3},
+			threshold: 3,
+			wantIDs:   nil,
+		},
+		{
+			name:      "threshold equal to lowest id removes it",
+			seed:      []int64{1, 2, 3},
+			threshold: 1,
+			wantIDs:   []int64{2, 3},
+		},
+		{
+			name:      "threshold below lowest id removes nothing",
+			seed:      []int64{1, 2, 3},
+			threshold: 0,
+			wantIDs:   []int64{1, 2, 3},
+		},
+		{
+			name:      "threshold above highest id removes everything",
+			seed:      []int64{1, 2, 3},
+			threshold: 100,
+			wantIDs:   nil,
+		},
+		{
+			name:      "no rows means no-op",
+			seed:      nil,
+			threshold: 5,
+			wantIDs:   nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			defer func() { _ = db.Close() }()
+			ensureOutboxTable(t, db)
+
+			for _, id := range tc.seed {
+				insertEvent(t, db, id, "test")
+			}
+
+			store := NewEventStore(db, outboxTable)
+			require.NoError(t, store.CleanUpToIncluding(context.Background(), tc.threshold))
+
+			remaining, err := store.FetchBatchOfEventsSince(context.Background(), -1, 100)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantIDs, fetchIDs(remaining))
+		})
+	}
+}
