@@ -148,6 +148,16 @@ func (s *EventStore) CleanUpEvents(ctx context.Context, storedEvents []eventstor
 	return err
 }
 
+// CleanUpToIncluding removes all events whose IncrementID is less than or
+// equal to incrementID. The event with IncrementID == incrementID, if any,
+// is also removed.
+func (s *EventStore) CleanUpToIncluding(ctx context.Context, incrementID int64) error {
+	// #nosec G201 -- tableName is validated in the constructor.
+	sqlStmt := fmt.Sprintf("DELETE FROM %s WHERE id <= ?", s.tableName)
+	_, err := s.db.ExecContext(ctx, sqlStmt, incrementID)
+	return err
+}
+
 // HasUncommittedID checks if any of the provided IDs exist in the table with read-uncommitted isolation.
 func (s *EventStore) HasUncommittedID(ctx context.Context, lowerBound, upperBound int64) (bool, error) {
 	hasUncommittedID := false
