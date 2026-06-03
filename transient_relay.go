@@ -7,14 +7,14 @@ import (
 
 type transientRelay struct {
 	relayBase
-	store     CleanUpStore
+	store     TransientStore
 	batchSize int
 }
 
 // NewTransientRelay creates a Relay that fetches events from store, dispatches them
 // to registered handlers, and removes each event after successful handling.
 // The name must be unique and is used for logging. Options are shared with NewPointerRelay.
-func NewTransientRelay(name string, store CleanUpStore, opts ...RelayOption) Relay {
+func NewTransientRelay(name string, store TransientStore, opts ...RelayOption) Relay {
 	cfg := &relayConfig{batchSize: DefaultBatchSize}
 	for _, opt := range opts {
 		opt(cfg)

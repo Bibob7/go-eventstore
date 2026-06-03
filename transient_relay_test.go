@@ -9,14 +9,14 @@ import (
 	"github.com/gofrs/uuid/v5"
 )
 
-type mockCleanUpStore struct {
+type mockTransientStore struct {
 	events     []StoredEvent
 	fetchErr   error
 	cleanUpErr error
 	cleanedUp  []StoredEvent
 }
 
-func (m *mockCleanUpStore) FetchBatchOfEvents(_ context.Context, limit int) ([]StoredEvent, error) {
+func (m *mockTransientStore) FetchBatchOfEvents(_ context.Context, limit int) ([]StoredEvent, error) {
 	if m.fetchErr != nil {
 		return nil, m.fetchErr
 	}
@@ -26,7 +26,7 @@ func (m *mockCleanUpStore) FetchBatchOfEvents(_ context.Context, limit int) ([]S
 	return m.events, nil
 }
 
-func (m *mockCleanUpStore) CleanUpEvents(_ context.Context, events []StoredEvent) error {
+func (m *mockTransientStore) CleanUpEvents(_ context.Context, events []StoredEvent) error {
 	if m.cleanUpErr != nil {
 		return m.cleanUpErr
 	}
@@ -49,7 +49,7 @@ func TestTransientRelay_Name(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			relay := NewTransientRelay(tc.relayName, &mockCleanUpStore{})
+			relay := NewTransientRelay(tc.relayName, &mockTransientStore{})
 			if relay.Name() != tc.relayName {
 				t.Fatalf("expected name %q, got %q", tc.relayName, relay.Name())
 			}
@@ -141,7 +141,7 @@ func TestTransientRelay_Run(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			store := &mockCleanUpStore{
+			store := &mockTransientStore{
 				events:     tc.events,
 				fetchErr:   tc.fetchErr,
 				cleanUpErr: tc.cleanUpErr,
@@ -212,7 +212,7 @@ func TestTransientRelay_CleansUpEventsAsBatch(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			store := &recordingCleanUpStore{mockCleanUpStore: mockCleanUpStore{events: tc.events}}
+			store := &recordingTransientStore{mockTransientStore: mockTransientStore{events: tc.events}}
 			h := &countingHandler{err: tc.handlerErr, failOnCall: tc.failOnNthHandle}
 			relay := NewTransientRelay("r", store)
 			relay.RegisterHandler(h)
@@ -255,14 +255,14 @@ func (c *countingHandler) Handle(_ context.Context, _ StoredEvent) error {
 	return nil
 }
 
-// recordingCleanUpStore records every CleanUpEvents invocation so tests can
+// recordingTransientStore records every CleanUpEvents invocation so tests can
 // assert both the number of batch calls and the number of events per call.
-type recordingCleanUpStore struct {
-	mockCleanUpStore
+type recordingTransientStore struct {
+	mockTransientStore
 	calls [][]StoredEvent
 }
 
-func (r *recordingCleanUpStore) CleanUpEvents(ctx context.Context, events []StoredEvent) error {
+func (r *recordingTransientStore) CleanUpEvents(ctx context.Context, events []StoredEvent) error {
 	r.calls = append(r.calls, append([]StoredEvent(nil), events...))
-	return r.mockCleanUpStore.CleanUpEvents(ctx, events)
+	return r.mockTransientStore.CleanUpEvents(ctx, events)
 }
