@@ -148,12 +148,12 @@ func TestTransientRelay_Run(t *testing.T) {
 			}
 			h := &mockHandler{err: tc.handlerErr}
 			relay := NewTransientRelay("r", store, tc.opts...)
-			relay.RegisterHandler(h)
+			relay.RegisterHandlerFactory(func(WorkerContext) Handler { return h })
 
 			var h2 *mockHandler
 			if tc.secondHandler {
 				h2 = &mockHandler{}
-				relay.RegisterHandler(h2)
+				relay.RegisterHandlerFactory(func(WorkerContext) Handler { return h2 })
 			}
 
 			err := relay.Run(context.Background())
@@ -215,7 +215,7 @@ func TestTransientRelay_CleansUpEventsAsBatch(t *testing.T) {
 			store := &recordingTransientStore{mockTransientStore: mockTransientStore{events: tc.events}}
 			h := &countingHandler{err: tc.handlerErr, failOnCall: tc.failOnNthHandle}
 			relay := NewTransientRelay("r", store)
-			relay.RegisterHandler(h)
+			relay.RegisterHandlerFactory(func(WorkerContext) Handler { return h })
 
 			err := relay.Run(context.Background())
 			if (err != nil) != tc.wantErr {

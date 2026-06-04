@@ -80,7 +80,9 @@ func run() error {
 		bundle.EventStore,
 		eventstore.WithBatchSize(10),
 	)
-	relay.RegisterHandler(&printHandler{})
+	relay.RegisterHandlerFactory(func(eventstore.WorkerContext) eventstore.Handler {
+		return &printHandler{}
+	})
 
 	if err := relay.Run(ctx); err != nil {
 		return fmt.Errorf("relay run: %w", err)

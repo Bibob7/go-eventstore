@@ -201,7 +201,7 @@ func TestPointerRelay_Run(t *testing.T) {
 			inc.setErr = tc.setErr
 			h := &mockHandler{err: tc.handlerErr, failOnCall: tc.failOnNthHandle}
 			relay := NewPointerRelay("test-processor", store, inc, tc.opts...)
-			relay.RegisterHandler(h)
+			relay.RegisterHandlerFactory(func(WorkerContext) Handler { return h })
 
 			err := relay.Run(context.Background())
 
@@ -247,7 +247,8 @@ func TestPointerRelay_MultipleHandlers(t *testing.T) {
 			h1 := &mockHandler{err: tc.h1Err}
 			h2 := &mockHandler{}
 			relay := NewPointerRelay("test-processor", store, inc)
-			relay.RegisterHandler(h1, h2)
+			relay.RegisterHandlerFactory(func(WorkerContext) Handler { return h1 })
+			relay.RegisterHandlerFactory(func(WorkerContext) Handler { return h2 })
 
 			err := relay.Run(context.Background())
 
@@ -273,7 +274,7 @@ func TestPointerRelay_IncrementIDConflictPropagates(t *testing.T) {
 	}
 	h := &mockHandler{}
 	relay := NewPointerRelay("test-processor", store, inc)
-	relay.RegisterHandler(h)
+	relay.RegisterHandlerFactory(func(WorkerContext) Handler { return h })
 
 	err := relay.Run(context.Background())
 	if err == nil || !errors.Is(err, ErrIncrementIDConflict) {
@@ -326,7 +327,7 @@ func TestPointerRelay_WithHandleDelay(t *testing.T) {
 			inc := newMockIncrementIDStore()
 			h := &mockHandler{}
 			relay := NewPointerRelay("test-processor", store, inc, WithHandleDelay(tc.delay))
-			relay.RegisterHandler(h)
+			relay.RegisterHandlerFactory(func(WorkerContext) Handler { return h })
 
 			ctx := context.Background()
 			if tc.cancelAfter > 0 {
@@ -385,7 +386,7 @@ func TestPointerRelay_BatchDelayOptions(t *testing.T) {
 			inc := newMockIncrementIDStore()
 			h := &mockHandler{err: tc.handlerErr}
 			relay := NewPointerRelay("test-processor", store, inc, tc.opts...)
-			relay.RegisterHandler(h)
+			relay.RegisterHandlerFactory(func(WorkerContext) Handler { return h })
 
 			start := time.Now()
 			_ = relay.Run(context.Background())
@@ -406,6 +407,11 @@ type delayedRelayStub struct {
 	processErr error
 }
 
-func (s *delayedRelayStub) Name() string                             { return s.name }
-func (s *delayedRelayStub) RegisterHandler(handler ...Handler) Relay { return s }
-func (s *delayedRelayStub) Run(ctx context.Context) error            { return s.processErr }
+func (s *delayedRelayStub) Name() string { return s.name }
+func (s *delayedRelayStub) RegisterHandlerFactory(factory func(WorkerContext) Handler) Relay {
+	return s
+}
+func (s *delayedRelayStub) RegisterBatchHandler(factory func(WorkerContext) BatchHandler) Relay {
+	return s
+}
+func (s *delayedRelayStub) Run(ctx context.Context) error { return s.processErr }

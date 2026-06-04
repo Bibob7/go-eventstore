@@ -32,9 +32,24 @@ var (
 type Relay interface {
 	// Name returns the unique name of this relay, used as the consumer identifier.
 	Name() string
-	// RegisterHandler adds one or more handlers to the relay.
-	// Handlers are called in registration order for every event.
-	RegisterHandler(handler ...Handler) Relay
+	// RegisterHandlerFactory registers a factory that produces one Handler
+	// instance per worker when the relay runs with WithParallelism(n > 1).
+	// With n == 1 a single instance is built. The factory is invoked once per
+	// worker at the start of each Run with a WorkerContext identifying that
+	// worker (ID in [0, Count)), so any per-worker state (e.g. a counter or
+	// a connection) is fresh and not shared. Calling RegisterHandlerFactory
+	// multiple times appends factories; each factory's resulting Handler is
+	// invoked in registration order within a worker.
+	RegisterHandlerFactory(factory func(WorkerContext) Handler) Relay
+	// RegisterBatchHandler registers a factory that produces one
+	// BatchHandler instance per worker when the relay runs with
+	// WithParallelism(n > 1). With n == 1 a single instance is built. The
+	// factory is invoked once per worker at the start of each Run with a
+	// WorkerContext identifying that worker, so any per-worker state (e.g.
+	// an AMQP channel) is fresh and not shared. Calling RegisterBatchHandler
+	// multiple times appends factories; each factory's resulting
+	// BatchHandler is invoked in registration order within a worker.
+	RegisterBatchHandler(factory func(WorkerContext) BatchHandler) Relay
 	// Run fetches the next batch of events and dispatches them to all handlers.
 	// It returns nil when the batch is empty or fully processed.
 	Run(ctx context.Context) error
@@ -57,7 +72,7 @@ func NewPointerRelay(name string, store PointerStore, incrementIDStore Increment
 	}
 
 	p := &pointerRelay{
-		relayBase:        relayBase{name: name, handleDelay: cfg.handleDelay},
+		relayBase:        relayBase{name: name, handleDelay: cfg.handleDelay, parallelism: cfg.parallelism},
 		eventStore:       store,
 		incrementIDStore: incrementIDStore,
 		batchSize:        cfg.batchSize,
@@ -80,8 +95,13 @@ func (p *pointerRelay) Name() string {
 	return p.name
 }
 
-func (p *pointerRelay) RegisterHandler(handler ...Handler) Relay {
-	p.registerHandler(handler...)
+func (p *pointerRelay) RegisterHandlerFactory(factory func(WorkerContext) Handler) Relay {
+	p.registerHandlerFactory(factory)
+	return p
+}
+
+func (p *pointerRelay) RegisterBatchHandler(factory func(WorkerContext) BatchHandler) Relay {
+	p.registerBatchHandler(factory)
 	return p
 }
 
@@ -113,17 +133,12 @@ func (p *pointerRelay) Run(ctx context.Context) (err error) {
 		}
 	}()
 
-	for _, storedEvent := range storedEvents {
-		for _, handler := range p.handlers() {
-			if err = p.handleEvent(ctx, storedEvent, handler); err != nil {
-				return err
-			}
-		}
-		newLastIncrementID = storedEvent.IncrementID
+	newLastIncrementID, _, err = p.processBatch(ctx, storedEvents)
+	if newLastIncrementID > 0 {
 		processed = true
-		if err = p.waitHandleDelay(ctx); err != nil {
-			return err
-		}
+	}
+	if err != nil {
+		return err
 	}
 
 	return nil

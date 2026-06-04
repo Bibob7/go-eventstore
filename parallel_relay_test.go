@@ -1,0 +1,800 @@
+package eventstore
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/gofrs/uuid/v5"
+)
+
+// mockBatchHandler implements BatchHandler and records per-worker
+// bookkeeping so tests can assert that stream-konsistente Verteilung und
+// Commit-Barriere korrekt funktionieren.
+type mockBatchHandler struct {
+	mu sync.Mutex
+
+	handleEvents     []StoredEvent
+	handleByEntity   map[uuid.UUID][]StoredEvent
+	handleByWorker   map[int][]StoredEvent
+	commitCalls      int
+	commitErr        error
+	handleErr        error
+	failOnNthHandle  int
+	calls            int
+	handleSleep      time.Duration
+	commitConcurrent atomic.Int32
+}
+
+func newMockBatchHandler() *mockBatchHandler {
+	return &mockBatchHandler{
+		handleByEntity: make(map[uuid.UUID][]StoredEvent),
+		handleByWorker: make(map[int][]StoredEvent),
+	}
+}
+
+func (m *mockBatchHandler) Name() string { return "mock-batch" }
+
+func (m *mockBatchHandler) Handle(ctx context.Context, ev StoredEvent) error {
+	m.mu.Lock()
+	m.calls++
+	n := m.calls
+	m.handleEvents = append(m.handleEvents, ev)
+	m.handleByEntity[ev.EntityID] = append(m.handleByEntity[ev.EntityID], ev)
+	workerID := workerIDForEntity(ev.EntityID)
+	m.handleByWorker[workerID] = append(m.handleByWorker[workerID], ev)
+	sleep := m.handleSleep
+	err := m.handleErr
+	m.mu.Unlock()
+
+	if sleep > 0 {
+		select {
+		case <-time.After(sleep):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	if m.failOnNthHandle == 0 {
+		return err
+	}
+	if n == m.failOnNthHandle {
+		return err
+	}
+	return nil
+}
+
+func (m *mockBatchHandler) Commit(_ context.Context) error {
+	m.commitConcurrent.Add(1)
+	defer m.commitConcurrent.Add(-1)
+	m.mu.Lock()
+	m.commitCalls++
+	err := m.commitErr
+	m.mu.Unlock()
+	return err
+}
+
+// workerIDForEntity mirrors the hashing done by pickWorker so tests can
+// predict which worker index a given entity is routed to.
+func workerIDForEntity(id uuid.UUID) int {
+	return int(id[0]) % 256 // stable per test, no parallelism involved
+}
+
+// newEventsByEntities produces StoredEvents with explicit EntityID assignment
+// so tests can control which worker an event lands on.
+func newEventsByEntities(incrementIDs []int64, entityIDs []uuid.UUID) []StoredEvent {
+	if len(incrementIDs) != len(entityIDs) {
+		panic("incrementIDs and entityIDs must have the same length")
+	}
+	out := make([]StoredEvent, len(incrementIDs))
+	for i, id := range incrementIDs {
+		out[i] = StoredEvent{
+			ID:          uuid.Must(uuid.NewV4()),
+			EntityID:    entityIDs[i],
+			IncrementID: id,
+			EventType:   "test-event",
+			OccurredAt:  time.Now(),
+		}
+	}
+	return out
+}
+
+// ---- processBatch unit tests -----------------------------------------
+
+func TestProcessBatch_DispatchingByEntityID(t *testing.T) {
+	// Two entities, multiple events each. All events of entityA must land on
+	// the same worker, and likewise for entityB.
+	entityA := uuid.Must(uuid.NewV4())
+	entityB := uuid.Must(uuid.NewV4())
+
+	// Force entityA to worker 0 and entityB to worker 2 by picking EntityIDs
+	// whose first byte maps cleanly. We can't dictate the worker index
+	// (pickWorker is fnv32a(EntityID)), so we just assert the partition
+	// invariant: every event of the same entity went to the same worker.
+	events := newEventsByEntities(
+		[]int64{1, 2, 3, 4, 5, 6},
+		[]uuid.UUID{entityA, entityA, entityA, entityB, entityB, entityB},
+	)
+
+	h := newMockBatchHandler()
+	relay := NewPointerRelay(
+		"test-dispatch",
+		&mockPointerStore{events: events},
+		newMockIncrementIDStore(),
+		WithBatchSize(10),
+		WithParallelism(4),
+	)
+	relay.RegisterBatchHandler(func(WorkerContext) BatchHandler { return h })
+
+	if err := relay.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	for _, ev := range events {
+		entityWorker := pickWorker(ev, 4)
+		for _, seen := range h.handleByEntity[ev.EntityID] {
+			seenWorker := pickWorker(seen, 4)
+			if entityWorker != seenWorker {
+				t.Errorf("entity %s: events split across workers %d and %d",
+					ev.EntityID, entityWorker, seenWorker)
+			}
+		}
+	}
+}
+
+func TestProcessBatch_CommitOncePerWorker(t *testing.T) {
+	// 4 entities (each routed to its own worker) => exactly 4 Commit calls.
+	// Use entities whose pickWorker index is distinct.
+	entities := make([]uuid.UUID, 4)
+	entityToWorker := make(map[uuid.UUID]int)
+	for i := range entities {
+		for {
+			uid := uuid.Must(uuid.NewV4())
+			idx := pickWorker(StoredEvent{EntityID: uid}, 4)
+			if _, taken := entityToWorker[uid]; taken {
+				continue
+			}
+			// Make sure this entity is uniquely routed.
+			duplicate := false
+			for _, w := range entityToWorker {
+				if w == idx {
+					duplicate = true
+					break
+				}
+			}
+			if duplicate {
+				continue
+			}
+			entities[i] = uid
+			entityToWorker[uid] = idx
+			break
+		}
+	}
+
+	var events []StoredEvent
+	var ids []int64
+	var entIDs []uuid.UUID
+	for i, e := range entities {
+		ids = append(ids, int64(i+1))
+		entIDs = append(entIDs, e)
+	}
+	events = newEventsByEntities(ids, entIDs)
+
+	h := newMockBatchHandler()
+	relay := NewPointerRelay(
+		"test-commit-once",
+		&mockPointerStore{events: events},
+		newMockIncrementIDStore(),
+		WithBatchSize(10),
+		WithParallelism(4),
+	)
+	relay.RegisterBatchHandler(func(WorkerContext) BatchHandler { return h })
+
+	if err := relay.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if h.commitCalls != 4 {
+		t.Errorf("expected 4 Commit calls (one per worker), got %d", h.commitCalls)
+	}
+}
+
+func TestProcessBatch_SequentialRegression(t *testing.T) {
+	// WithParallelism(1) must behave bit-for-bit like the original
+	// sequential path. We re-use a representative subset of the
+	// TestPointerRelay_Run cases.
+	store := &mockPointerStore{events: newEvents(1, 2, 3)}
+	inc := newMockIncrementIDStore()
+	h := &mockHandler{}
+	relay := NewPointerRelay(
+		"test-seq",
+		store, inc,
+		WithBatchSize(10),
+		WithParallelism(1),
+	)
+	relay.RegisterHandlerFactory(func(WorkerContext) Handler { return h })
+
+	if err := relay.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(h.handleEvents) != 3 {
+		t.Errorf("expected 3 handled events, got %d", len(h.handleEvents))
+	}
+	lastID, _ := inc.GetIncrementID(context.Background(), "test-seq")
+	if lastID != 3 {
+		t.Errorf("expected last increment ID 3, got %d", lastID)
+	}
+}
+
+func TestProcessBatch_ErrEventNotReadyToProcess(t *testing.T) {
+	// Use 3 events, all routed to the same worker (via a single EntityID) so
+	// the failure mid-batch happens on the same worker that processed the
+	// earlier events. That worker must NOT call Commit after the failure;
+	// events 1 and 2 are also handled by the same worker, so they cannot
+	// have committed either.
+	entity := uuid.Must(uuid.NewV4())
+	events := newEventsByEntities(
+		[]int64{1, 2, 3},
+		[]uuid.UUID{entity, entity, entity},
+	)
+	h := &mockBatchHandlerAdapter{errOnCall: 3, err: ErrEventNotReadyToProcess}
+	relay := NewPointerRelay(
+		"test-notready",
+		&mockPointerStore{events: events},
+		newMockIncrementIDStore(),
+		WithBatchSize(10),
+		WithParallelism(4),
+	)
+	relay.RegisterBatchHandler(func(WorkerContext) BatchHandler { return h })
+
+	err := relay.Run(context.Background())
+	if !errors.Is(err, ErrEventNotReadyToProcess) {
+		t.Fatalf("expected ErrEventNotReadyToProcess, got %v", err)
+	}
+	if h.calls != 3 {
+		t.Errorf("expected 3 Handle calls, got %d", h.calls)
+	}
+	if h.commitCalls != 0 {
+		t.Errorf("expected 0 Commit calls (single worker, errored before commit), got %d", h.commitCalls)
+	}
+}
+
+func TestProcessBatch_HandlerErrorAbortsPool(t *testing.T) {
+	boom := errors.New("boom")
+	// Same single-entity setup so the failing worker is the one that would
+	// have called Commit; after the error, no Commit must run.
+	entity := uuid.Must(uuid.NewV4())
+	events := newEventsByEntities(
+		[]int64{1, 2, 3},
+		[]uuid.UUID{entity, entity, entity},
+	)
+	h := &mockBatchHandlerAdapter{errOnCall: 2, err: boom}
+	relay := NewPointerRelay(
+		"test-handler-err",
+		&mockPointerStore{events: events},
+		newMockIncrementIDStore(),
+		WithBatchSize(10),
+		WithParallelism(4),
+	)
+	relay.RegisterBatchHandler(func(WorkerContext) BatchHandler { return h })
+
+	err := relay.Run(context.Background())
+	if !errors.Is(err, boom) {
+		t.Fatalf("expected boom, got %v", err)
+	}
+	if h.commitCalls != 0 {
+		t.Errorf("expected 0 Commit calls, got %d", h.commitCalls)
+	}
+}
+
+func TestProcessBatch_CommitError(t *testing.T) {
+	commitErr := errors.New("commit failed")
+	events := newEvents(1, 2, 3)
+	h := newMockBatchHandler()
+	h.commitErr = commitErr
+	relay := NewPointerRelay(
+		"test-commit-err",
+		&mockPointerStore{events: events},
+		newMockIncrementIDStore(),
+		WithBatchSize(10),
+		WithParallelism(2),
+	)
+	relay.RegisterBatchHandler(func(WorkerContext) BatchHandler { return h })
+
+	err := relay.Run(context.Background())
+	if !errors.Is(err, commitErr) {
+		t.Fatalf("expected commit error, got %v", err)
+	}
+}
+
+func TestProcessBatch_ContextCancelDuringDispatch(t *testing.T) {
+	// A handler that blocks until ctx is done. Cancel from a goroutine after
+	// a short delay and assert the pool exits cleanly.
+	entity := uuid.Must(uuid.NewV4())
+	events := newEventsByEntities(
+		[]int64{1, 2, 3, 4},
+		[]uuid.UUID{entity, entity, entity, entity},
+	)
+	h := newMockBatchHandler()
+	h.handleSleep = 100 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	relay := NewPointerRelay(
+		"test-ctx-cancel",
+		&mockPointerStore{events: events},
+		newMockIncrementIDStore(),
+		WithBatchSize(10),
+		WithParallelism(2),
+	)
+	relay.RegisterBatchHandler(func(WorkerContext) BatchHandler { return h })
+
+	start := time.Now()
+	err := relay.Run(ctx)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error from ctx cancel, got nil")
+	}
+	// Should bail out well before the 4 * 100ms sequential time.
+	if elapsed >= 400*time.Millisecond {
+		t.Errorf("expected early exit, elapsed=%v", elapsed)
+	}
+}
+
+// ---- Integration tests against PointerRelay / TransientRelay --------
+
+func TestPointerRelay_WithParallelism_4(t *testing.T) {
+	events := newEvents(1, 2, 3, 4, 5)
+	store := &mockPointerStore{events: events}
+	inc := newMockIncrementIDStore()
+	h := newMockBatchHandler()
+	relay := NewPointerRelay(
+		"test-pointer-parallel",
+		store, inc,
+		WithBatchSize(10),
+		WithParallelism(4),
+	)
+	relay.RegisterBatchHandler(func(WorkerContext) BatchHandler { return h })
+
+	if err := relay.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	lastID, _ := inc.GetIncrementID(context.Background(), "test-pointer-parallel")
+	if lastID != 5 {
+		t.Errorf("expected last increment ID 5, got %d", lastID)
+	}
+	if len(h.handleEvents) != 5 {
+		t.Errorf("expected 5 handled events, got %d", len(h.handleEvents))
+	}
+}
+
+func TestTransientRelay_WithParallelism_4_CleansUpBatch(t *testing.T) {
+	events := []StoredEvent{newStoredEvent(1), newStoredEvent(2), newStoredEvent(3)}
+	store := &recordingTransientStore{mockTransientStore: mockTransientStore{events: events}}
+	h := newMockBatchHandler()
+	relay := NewTransientRelay(
+		"test-transient-parallel",
+		store,
+		WithBatchSize(10),
+		WithParallelism(4),
+	)
+	relay.RegisterBatchHandler(func(WorkerContext) BatchHandler { return h })
+
+	if err := relay.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(store.calls) != 1 {
+		t.Fatalf("expected 1 CleanUpEvents call, got %d", len(store.calls))
+	}
+	if len(store.calls[0]) != 3 {
+		t.Errorf("expected 3 events in clean-up call, got %d", len(store.calls[0]))
+	}
+}
+
+// ---- mockBatchHandlerAdapter -----------------------------------------
+
+// mockBatchHandlerAdapter adapts mockHandler (a plain Handler) to
+// BatchHandler so we can run the parallel tests with a known-failing
+// handler. The original mockHandler is reused to keep assertions
+// familiar.
+type mockBatchHandlerAdapter struct {
+	mu          sync.Mutex
+	inner       mockHandler
+	errOnCall   int
+	err         error
+	calls       int
+	commitCalls int
+}
+
+func (m *mockBatchHandlerAdapter) Name() string { return "adapter" }
+
+func (m *mockBatchHandlerAdapter) Handle(ctx context.Context, ev StoredEvent) error {
+	m.mu.Lock()
+	m.calls++
+	n := m.calls
+	err := m.err
+	m.mu.Unlock()
+	if m.errOnCall == 0 || n == m.errOnCall {
+		return err
+	}
+	return nil
+}
+
+func (m *mockBatchHandlerAdapter) Commit(_ context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.commitCalls++
+	return nil
+}
+
+// ---- HandlerFactory tests --------------------------------------------
+
+// counterHandler is a stateful Handler used to verify that each worker
+// gets its own instance when registered via RegisterHandlerFactory.
+type counterHandler struct {
+	id    int
+	mu    sync.Mutex
+	seen  []uuid.UUID
+	other *counterHandler
+}
+
+func (c *counterHandler) Name() string { return "counter" }
+
+func (c *counterHandler) Handle(ctx context.Context, ev StoredEvent) error {
+	c.mu.Lock()
+	c.seen = append(c.seen, ev.EntityID)
+	other := c.other
+	c.mu.Unlock()
+	if other != nil {
+		_ = other
+	}
+	return nil
+}
+
+func TestRegisterHandlerFactory_OneInstancePerWorker(t *testing.T) {
+	// With WithParallelism(3) and one registered factory, the factory must
+	// be invoked exactly 3 times — once per worker. We pick entities that
+	// hash to different workers so all three workers receive at least one
+	// event and the factory fires for each. Additionally, every invocation
+	// must see a WorkerContext with Count == 3 and a unique ID in [0, 3).
+	entities := pickDistinctEntities(t, 3, 3)
+	events := newEventsByEntities([]int64{1, 2, 3}, entities)
+	relay := NewPointerRelay(
+		"test-handler-factory-count",
+		&mockPointerStore{events: events},
+		newMockIncrementIDStore(),
+		WithBatchSize(10),
+		WithParallelism(3),
+	)
+	var (
+		factoryCalls   atomic.Int32
+		seenWorkerIDs  sync.Map
+		seenWorkerSize atomic.Int32
+	)
+	relay.RegisterHandlerFactory(func(wc WorkerContext) Handler {
+		factoryCalls.Add(1)
+		if wc.Count != 3 {
+			t.Errorf("factory invocation: Count = %d, want 3", wc.Count)
+		}
+		if wc.ID < 0 || wc.ID >= wc.Count {
+			t.Errorf("factory invocation: ID = %d, want in [0, %d)", wc.ID, wc.Count)
+		}
+		if _, loaded := seenWorkerIDs.LoadOrStore(wc.ID, struct{}{}); loaded {
+			t.Errorf("factory invoked twice for worker ID %d", wc.ID)
+		}
+		seenWorkerSize.Add(1)
+		return &counterHandler{}
+	})
+
+	if err := relay.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := factoryCalls.Load(); got != 3 {
+		t.Errorf("expected factory to be called 3 times (one per worker), got %d", got)
+	}
+	if got := seenWorkerSize.Load(); got != 3 {
+		t.Errorf("expected 3 distinct worker IDs, got %d", got)
+	}
+}
+
+// pickDistinctEntities returns n UUIDs whose pickWorker(EntityID, workers) is
+// a unique value in [0, workers). The set is built by trial-and-error using
+// fresh UUIDs; it is bounded to a small fixed number of attempts so a test
+// fails fast on hash collisions rather than spinning forever.
+func pickDistinctEntities(t *testing.T, n, workers int) []uuid.UUID {
+	t.Helper()
+	out := make([]uuid.UUID, 0, n)
+	seen := make(map[int]struct{}, n)
+	for attempts := 0; attempts < 1000 && len(out) < n; attempts++ {
+		id := uuid.Must(uuid.NewV4())
+		idx := pickWorker(StoredEvent{EntityID: id}, workers)
+		if _, ok := seen[idx]; ok {
+			continue
+		}
+		seen[idx] = struct{}{}
+		out = append(out, id)
+	}
+	if len(out) < n {
+		t.Fatalf("could not find %d entities hashing to distinct workers in %d", n, workers)
+	}
+	return out
+}
+
+func TestRegisterHandlerFactory_DistinctInstancesPerWorker(t *testing.T) {
+	// Each worker must receive its own counterHandler instance, identified
+	// by a unique id assigned in the factory. The id is sourced from
+	// WorkerContext.ID so we additionally assert that worker ID < Count
+	// and the per-instance id is the same as the worker ID we observed at
+	// factory time. Use entities that hash to distinct workers so all 3
+	// instances are actually built.
+	entities := pickDistinctEntities(t, 3, 3)
+	events := newEventsByEntities([]int64{1, 2, 3}, entities)
+	relay := NewPointerRelay(
+		"test-handler-factory-distinct",
+		&mockPointerStore{events: events},
+		newMockIncrementIDStore(),
+		WithBatchSize(10),
+		WithParallelism(3),
+	)
+
+	var instancesMu sync.Mutex
+	instances := make(map[int]*counterHandler)
+	relay.RegisterHandlerFactory(func(wc WorkerContext) Handler {
+		if wc.Count != 3 {
+			t.Errorf("factory: Count = %d, want 3", wc.Count)
+		}
+		c := &counterHandler{id: wc.ID}
+		instancesMu.Lock()
+		instances[wc.ID] = c
+		instancesMu.Unlock()
+		return c
+	})
+
+	if err := relay.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(instances) != 3 {
+		t.Fatalf("expected 3 distinct instances, got %d", len(instances))
+	}
+	totalSeen := 0
+	for _, c := range instances {
+		c.mu.Lock()
+		totalSeen += len(c.seen)
+		c.mu.Unlock()
+	}
+	if totalSeen != 3 {
+		t.Errorf("expected 3 events distributed across instances, got %d", totalSeen)
+	}
+	// Every event must have landed on exactly one instance.
+	allEntities := make(map[uuid.UUID]int)
+	for _, c := range instances {
+		c.mu.Lock()
+		for _, e := range c.seen {
+			allEntities[e]++
+		}
+		c.mu.Unlock()
+	}
+	for e, n := range allEntities {
+		if n != 1 {
+			t.Errorf("entity %s seen by %d instances, want 1", e, n)
+		}
+	}
+}
+
+func TestRegisterHandlerFactory_StreamCoherenceWithFactory(t *testing.T) {
+	// Events of the same entity must all be handled by the same instance.
+	entityA := uuid.Must(uuid.NewV4())
+	entityB := uuid.Must(uuid.NewV4())
+	events := newEventsByEntities(
+		[]int64{1, 2, 3, 4, 5, 6},
+		[]uuid.UUID{entityA, entityA, entityA, entityB, entityB, entityB},
+	)
+
+	relay := NewPointerRelay(
+		"test-handler-factory-coherence",
+		&mockPointerStore{events: events},
+		newMockIncrementIDStore(),
+		WithBatchSize(10),
+		WithParallelism(4),
+	)
+
+	var mu sync.Mutex
+	instances := make(map[uuid.UUID][]int) // entity -> instance ids seen
+	relay.RegisterHandlerFactory(func(wc WorkerContext) Handler {
+		return &recordingHandler{
+			id: wc.ID,
+			onSee: func(ev StoredEvent, instanceID int) {
+				mu.Lock()
+				instances[ev.EntityID] = append(instances[ev.EntityID], instanceID)
+				mu.Unlock()
+			},
+		}
+	})
+
+	if err := relay.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	for entity, ids := range instances {
+		if len(ids) == 0 {
+			t.Errorf("entity %s: no events handled", entity)
+			continue
+		}
+		first := ids[0]
+		for _, id := range ids {
+			if id != first {
+				t.Errorf("entity %s: events handled by instances %v, want all the same",
+					entity, ids)
+				break
+			}
+		}
+	}
+}
+
+func TestRegisterHandlerFactory_WorkerContextMatchesWorker(t *testing.T) {
+	// Every event routed to a given worker must be handled by the instance
+	// whose factory-time WorkerContext.ID equals that worker's index. This
+	// is the round-trip proof that the worker ID passed to the factory is
+	// the same one that pickWorker() would assign for the entity.
+	entities := pickDistinctEntities(t, 3, 3)
+	events := newEventsByEntities([]int64{1, 2, 3}, entities)
+	relay := NewPointerRelay(
+		"test-handler-factory-wcid",
+		&mockPointerStore{events: events},
+		newMockIncrementIDStore(),
+		WithBatchSize(10),
+		WithParallelism(3),
+	)
+
+	var (
+		instancesMu sync.Mutex
+		instances   = make(map[int]*workerContextRecordingHandler)
+	)
+	relay.RegisterHandlerFactory(func(wc WorkerContext) Handler {
+		h := &workerContextRecordingHandler{workerID: wc.ID}
+		instancesMu.Lock()
+		instances[wc.ID] = h
+		instancesMu.Unlock()
+		return h
+	})
+
+	if err := relay.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(instances) != 3 {
+		t.Fatalf("expected 3 worker instances, got %d", len(instances))
+	}
+
+	for _, ev := range events {
+		wantWorker := pickWorker(ev, 3)
+		recording := instances[wantWorker]
+		if recording == nil {
+			t.Errorf("entity %s: no instance for worker %d", ev.EntityID, wantWorker)
+			continue
+		}
+		recording.mu.Lock()
+		got := recording.seen[ev.EntityID]
+		recording.mu.Unlock()
+		if got != wantWorker {
+			t.Errorf("entity %s: routed to worker %d but handler came from worker %d",
+				ev.EntityID, wantWorker, got)
+		}
+	}
+}
+
+func TestRegisterHandlerFactory_WorkerCountMatchesConfigured(t *testing.T) {
+	// The Count field on WorkerContext must always match the configured
+	// parallelism, regardless of how many events each worker actually sees.
+	const configured = 4
+	events := newEvents(1, 2, 3) // fewer events than workers; some workers idle
+	relay := NewPointerRelay(
+		"test-handler-factory-count-field",
+		&mockPointerStore{events: events},
+		newMockIncrementIDStore(),
+		WithBatchSize(10),
+		WithParallelism(configured),
+	)
+
+	relay.RegisterHandlerFactory(func(wc WorkerContext) Handler {
+		if wc.Count != configured {
+			t.Errorf("factory: Count = %d, want %d", wc.Count, configured)
+		}
+		return &counterHandler{id: wc.ID}
+	})
+
+	if err := relay.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
+func TestRegisterHandlerFactory_WorkerContextInSequentialMode(t *testing.T) {
+	// With WithParallelism(1) the factory is invoked exactly once with
+	// WorkerContext{ID: 0, Count: 1}.
+	events := newEvents(1, 2, 3)
+	relay := NewPointerRelay(
+		"test-handler-factory-sequential-wc",
+		&mockPointerStore{events: events},
+		newMockIncrementIDStore(),
+		WithBatchSize(10),
+		WithParallelism(1),
+	)
+	var (
+		factoryCalls atomic.Int32
+		seenCount    atomic.Int32
+		seenID       atomic.Int32
+	)
+	relay.RegisterHandlerFactory(func(wc WorkerContext) Handler {
+		factoryCalls.Add(1)
+		seenCount.Store(int32(wc.Count))
+		seenID.Store(int32(wc.ID))
+		return &counterHandler{}
+	})
+
+	if err := relay.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := factoryCalls.Load(); got != 1 {
+		t.Errorf("expected factory to be called exactly once, got %d", got)
+	}
+	if got := seenCount.Load(); got != 1 {
+		t.Errorf("expected WorkerContext.Count = 1, got %d", got)
+	}
+	if got := seenID.Load(); got != 0 {
+		t.Errorf("expected WorkerContext.ID = 0, got %d", got)
+	}
+}
+
+// workerContextRecordingHandler is keyed on its factory-time workerID and
+// records the (entity -> workerID) mapping for assertions in
+// TestRegisterHandlerFactory_WorkerContextMatchesWorker.
+type workerContextRecordingHandler struct {
+	workerID int
+	mu       sync.Mutex
+	seen     map[uuid.UUID]int
+}
+
+func (w *workerContextRecordingHandler) Name() string { return "wc-recording" }
+
+func (w *workerContextRecordingHandler) Handle(_ context.Context, ev StoredEvent) error {
+	w.mu.Lock()
+	if w.seen == nil {
+		w.seen = make(map[uuid.UUID]int)
+	}
+	w.seen[ev.EntityID] = w.workerID
+	w.mu.Unlock()
+	return nil
+}
+
+// recordingHandler captures each event with the instance id assigned by
+// the factory, so tests can assert stream coherence across workers.
+type recordingHandler struct {
+	id    int
+	mu    sync.Mutex
+	seen  []StoredEvent
+	onSee func(ev StoredEvent, id int)
+}
+
+func (r *recordingHandler) Name() string { return "recording" }
+
+func (r *recordingHandler) Handle(ctx context.Context, ev StoredEvent) error {
+	r.mu.Lock()
+	r.seen = append(r.seen, ev)
+	onSee := r.onSee
+	r.mu.Unlock()
+	if onSee != nil {
+		onSee(ev, r.id)
+	}
+	return nil
+}

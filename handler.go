@@ -3,7 +3,8 @@ package eventstore
 import "context"
 
 // Handler processes a single StoredEvent. Register one or more handlers on a
-// Relay via RegisterHandler. All handlers are called for every event in order.
+// Relay via RegisterHandlerFactory (one instance per worker) or
+// RegisterBatchHandler. All handlers are called for every event in order.
 type Handler interface {
 	// Handle processes of the given event. Return ErrEventNotReadyToProcess to
 	// signal a temporary condition; return any other error to abort the batch.

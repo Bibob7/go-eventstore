@@ -10,6 +10,7 @@ type relayConfig struct {
 	handleDelay           time.Duration
 	batchDelay            time.Duration
 	conditionalBatchDelay time.Duration
+	parallelism           int
 }
 
 // RelayOption is a functional option for configuring a PointerRelay.
@@ -44,5 +45,23 @@ func WithBatchDelay(d time.Duration) RelayOption {
 func WithConditionalBatchDelay(d time.Duration) RelayOption {
 	return func(c *relayConfig) {
 		c.conditionalBatchDelay = d
+	}
+}
+
+// WithParallelism runs the relay across n worker goroutines partitioned by
+// the event's EntityID (fnv32a(EntityID) % n). All events of a given
+// aggregate are processed sequentially on the same worker, preserving
+// stream ordering. n must be >= 1; values < 1 are clamped to 1.
+//
+// When n > 1, factories registered via RegisterBatchHandler produce one
+// BatchHandler per worker, and Commit is invoked once per worker per batch
+// so per-batch work (e.g. AMQP publish) flushes atomically. Plain Handlers
+// returned by RegisterHandlerFactory are auto-wrapped with a no-op Commit.
+func WithParallelism(n int) RelayOption {
+	return func(c *relayConfig) {
+		if n < 1 {
+			n = 1
+		}
+		c.parallelism = n
 	}
 }

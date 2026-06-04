@@ -80,7 +80,9 @@ func run() error {
 		bundle.IncrementIDStore,
 		eventstore.WithBatchSize(10),
 	)
-	analyticsRelay.RegisterHandler(&loggingHandler{name: "analytics"})
+	analyticsRelay.RegisterHandlerFactory(func(eventstore.WorkerContext) eventstore.Handler {
+		return &loggingHandler{name: "analytics"}
+	})
 
 	notificationRelay := eventstore.NewPointerRelay(
 		"notification-consumer",
@@ -88,7 +90,9 @@ func run() error {
 		bundle.IncrementIDStore,
 		eventstore.WithBatchSize(10),
 	)
-	notificationRelay.RegisterHandler(&loggingHandler{name: "notifications"})
+	notificationRelay.RegisterHandlerFactory(func(eventstore.WorkerContext) eventstore.Handler {
+		return &loggingHandler{name: "notifications"}
+	})
 
 	if err := runConcurrent(ctx, analyticsRelay, notificationRelay); err != nil {
 		return err

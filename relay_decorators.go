@@ -27,8 +27,13 @@ func (r delayedRelay) Name() string {
 	return r.relay.Name()
 }
 
-func (r delayedRelay) RegisterHandler(handler ...Handler) Relay {
-	r.relay.RegisterHandler(handler...)
+func (r delayedRelay) RegisterHandlerFactory(factory func(WorkerContext) Handler) Relay {
+	r.relay.RegisterHandlerFactory(factory)
+	return r
+}
+
+func (r delayedRelay) RegisterBatchHandler(factory func(WorkerContext) BatchHandler) Relay {
+	r.relay.RegisterBatchHandler(factory)
 	return r
 }
 
@@ -69,8 +74,13 @@ func (r batchDelayedRelay) Name() string {
 	return r.relay.Name()
 }
 
-func (r batchDelayedRelay) RegisterHandler(handler ...Handler) Relay {
-	r.relay.RegisterHandler(handler...)
+func (r batchDelayedRelay) RegisterHandlerFactory(factory func(WorkerContext) Handler) Relay {
+	r.relay.RegisterHandlerFactory(factory)
+	return r
+}
+
+func (r batchDelayedRelay) RegisterBatchHandler(factory func(WorkerContext) BatchHandler) Relay {
+	r.relay.RegisterBatchHandler(factory)
 	return r
 }
 

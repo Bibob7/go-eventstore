@@ -21,7 +21,7 @@ func NewTransientRelay(name string, store TransientStore, opts ...RelayOption) R
 	}
 
 	t := &transientRelay{
-		relayBase: relayBase{name: name, handleDelay: cfg.handleDelay},
+		relayBase: relayBase{name: name, handleDelay: cfg.handleDelay, parallelism: cfg.parallelism},
 		store:     store,
 		batchSize: cfg.batchSize,
 	}
@@ -43,8 +43,13 @@ func (t *transientRelay) Name() string {
 	return t.name
 }
 
-func (t *transientRelay) RegisterHandler(handler ...Handler) Relay {
-	t.registerHandler(handler...)
+func (t *transientRelay) RegisterHandlerFactory(factory func(WorkerContext) Handler) Relay {
+	t.registerHandlerFactory(factory)
+	return t
+}
+
+func (t *transientRelay) RegisterBatchHandler(factory func(WorkerContext) BatchHandler) Relay {
+	t.registerBatchHandler(factory)
 	return t
 }
 
@@ -54,7 +59,7 @@ func (t *transientRelay) Run(ctx context.Context) (err error) {
 		return fmt.Errorf("failed to fetch events: %w", err)
 	}
 
-	processed := make([]StoredEvent, 0, len(events))
+	var processed []StoredEvent
 	defer func() {
 		if len(processed) == 0 {
 			return
@@ -64,19 +69,6 @@ func (t *transientRelay) Run(ctx context.Context) (err error) {
 		}
 	}()
 
-	for _, event := range events {
-		for _, handler := range t.handlers() {
-			if err = t.handleEvent(ctx, event, handler); err != nil {
-				return err
-			}
-		}
-
-		processed = append(processed, event)
-
-		if err = t.waitHandleDelay(ctx); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	_, processed, err = t.processBatch(ctx, events)
+	return err
 }
