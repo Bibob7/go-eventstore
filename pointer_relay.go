@@ -71,7 +71,7 @@ func newPointerRelay(name string, store PointerStore, incrementIDStore Increment
 // per worker at the start of each Run with a WorkerContext identifying
 // that worker (ID in [0, Count)), so any per-worker state is fresh and
 // not shared. With parallelism == 1 a single instance is built. If
-// factory is nil, ErrNilFactory is returned.
+// factory is nil, the first Run returns ErrNilFactory.
 //
 // Cursor semantics: partial progress is allowed in the sequential path
 // (parallelism <= 1). If a Handle call fails mid-batch, the cursor
@@ -85,11 +85,8 @@ func newPointerRelay(name string, store PointerStore, incrementIDStore Increment
 // partial-progress case (e.g. when the context is cancelled between two
 // Handle calls and the cursor was advanced to the last successful event
 // on the previous Run).
-func NewPointerHandlerRelay(name string, store PointerStore, incrementIDStore IncrementIDStore, factory func(WorkerContext) Handler, opts ...RelayOption) (Relay, error) {
-	if factory == nil {
-		return nil, fmt.Errorf("NewPointerHandlerRelay: %w", ErrNilFactory)
-	}
-	return newPointerRelay(name, store, incrementIDStore, handlerBatchStrategy{factory: factory}, opts...), nil
+func NewPointerHandlerRelay(name string, store PointerStore, incrementIDStore IncrementIDStore, factory func(WorkerContext) Handler, opts ...RelayOption) Relay {
+	return newPointerRelay(name, store, incrementIDStore, handlerBatchStrategy{factory: factory}, opts...)
 }
 
 // NewPointerBatchHandlerRelay creates a cursor-based Relay backed by
@@ -101,17 +98,14 @@ func NewPointerHandlerRelay(name string, store PointerStore, incrementIDStore In
 // once per worker at the start of each Run with a WorkerContext
 // identifying that worker, so any per-worker state (e.g. an AMQP channel)
 // is fresh and not shared. With parallelism == 1 a single instance is
-// built. If factory is nil, ErrNilFactory is returned.
+// built. If factory is nil, the first Run returns ErrNilFactory.
 //
 // Strict all-or-nothing: the cursor is advanced only when the entire
 // batch (Handle for every event plus Commit for every BatchHandler)
 // completed successfully. Any failure leaves the cursor where it was
 // and the next Run retries the same batch.
-func NewPointerBatchHandlerRelay(name string, store PointerStore, incrementIDStore IncrementIDStore, factory func(WorkerContext) BatchHandler, opts ...RelayOption) (Relay, error) {
-	if factory == nil {
-		return nil, fmt.Errorf("NewPointerBatchHandlerRelay: %w", ErrNilFactory)
-	}
-	return newPointerRelay(name, store, incrementIDStore, batchHandlerBatchStrategy{factory: factory}, opts...), nil
+func NewPointerBatchHandlerRelay(name string, store PointerStore, incrementIDStore IncrementIDStore, factory func(WorkerContext) BatchHandler, opts ...RelayOption) Relay {
+	return newPointerRelay(name, store, incrementIDStore, batchHandlerBatchStrategy{factory: factory}, opts...)
 }
 
 func (p *pointerRelay) Name() string {
@@ -119,6 +113,9 @@ func (p *pointerRelay) Name() string {
 }
 
 func (p *pointerRelay) Run(ctx context.Context) (err error) {
+	if err := p.strategy.validate(); err != nil {
+		return err
+	}
 	lastIncrementID, err := p.incrementIDStore.GetIncrementID(ctx, p.name)
 	if err != nil {
 		return fmt.Errorf("failed to get last increment id: %w", err)

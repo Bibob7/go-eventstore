@@ -10,8 +10,8 @@ var (
 	// Handlers should return this error to indicate a temporary condition;
 	// the relay will pause before retrying rather than treating it as a hard failure.
 	ErrEventNotReadyToProcess = errors.New("event not ready to process")
-	// ErrNilFactory is returned by the relay constructors when the supplied
-	// handler factory is nil.
+	// ErrNilFactory is returned by Run when the relay was created with a nil
+	// handler factory.
 	ErrNilFactory = errors.New("relay handler factory must not be nil")
 )
 

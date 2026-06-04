@@ -101,16 +101,6 @@ func newEvents(incrementIDs ...int64) []StoredEvent {
 	return events
 }
 
-// must panics if err is non-nil and otherwise returns v. It keeps the
-// happy-path relay-constructor call sites a single expression; a panic
-// in a test fails it just like t.Fatal.
-func must[T any](v T, err error) T {
-	if err != nil {
-		panic(err)
-	}
-	return v
-}
-
 func TestPointerRelay_Name(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -120,7 +110,7 @@ func TestPointerRelay_Name(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			relay := must(NewPointerHandlerRelay(tc.relayName, nil, nil, func(WorkerContext) Handler { return &mockHandler{} }))
+			relay := NewPointerHandlerRelay(tc.relayName, nil, nil, func(WorkerContext) Handler { return &mockHandler{} })
 			if relay.Name() != tc.relayName {
 				t.Errorf("expected name %q, got %q", tc.relayName, relay.Name())
 			}
@@ -128,44 +118,32 @@ func TestPointerRelay_Name(t *testing.T) {
 	}
 }
 
-func TestRelayConstructors_ErrorOnNilFactory(t *testing.T) {
+func TestRelay_RunErrorsOnNilFactory(t *testing.T) {
 	tests := []struct {
-		name      string
-		construct func() (Relay, error)
+		name  string
+		relay Relay
 	}{
 		{
-			name: "NewPointerHandlerRelay",
-			construct: func() (Relay, error) {
-				return NewPointerHandlerRelay("r", &mockPointerStore{}, newMockIncrementIDStore(), nil)
-			},
+			name:  "NewPointerHandlerRelay",
+			relay: NewPointerHandlerRelay("r", &mockPointerStore{events: newEvents(1)}, newMockIncrementIDStore(), nil),
 		},
 		{
-			name: "NewPointerBatchHandlerRelay",
-			construct: func() (Relay, error) {
-				return NewPointerBatchHandlerRelay("r", &mockPointerStore{}, newMockIncrementIDStore(), nil)
-			},
+			name:  "NewPointerBatchHandlerRelay",
+			relay: NewPointerBatchHandlerRelay("r", &mockPointerStore{events: newEvents(1)}, newMockIncrementIDStore(), nil),
 		},
 		{
-			name: "NewTransientHandlerRelay",
-			construct: func() (Relay, error) {
-				return NewTransientHandlerRelay("r", &mockTransientStore{}, nil)
-			},
+			name:  "NewTransientHandlerRelay",
+			relay: NewTransientHandlerRelay("r", &mockTransientStore{events: newEvents(1)}, nil),
 		},
 		{
-			name: "NewTransientBatchHandlerRelay",
-			construct: func() (Relay, error) {
-				return NewTransientBatchHandlerRelay("r", &mockTransientStore{}, nil)
-			},
+			name:  "NewTransientBatchHandlerRelay",
+			relay: NewTransientBatchHandlerRelay("r", &mockTransientStore{events: newEvents(1)}, nil),
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			relay, err := tc.construct()
-			if !errors.Is(err, ErrNilFactory) {
-				t.Errorf("expected ErrNilFactory, got %v", err)
-			}
-			if relay != nil {
-				t.Errorf("expected nil relay on error, got %v", relay)
+			if err := tc.relay.Run(context.Background()); !errors.Is(err, ErrNilFactory) {
+				t.Errorf("expected ErrNilFactory from Run, got %v", err)
 			}
 		})
 	}
@@ -253,7 +231,7 @@ func TestPointerRelay_Run(t *testing.T) {
 			inc.getErr = tc.getErr
 			inc.setErr = tc.setErr
 			h := &mockHandler{err: tc.handlerErr, failOnCall: tc.failOnNthHandle}
-			relay := must(NewPointerHandlerRelay("test-processor", store, inc, func(WorkerContext) Handler { return h }, tc.opts...))
+			relay := NewPointerHandlerRelay("test-processor", store, inc, func(WorkerContext) Handler { return h }, tc.opts...)
 
 			err := relay.Run(context.Background())
 
@@ -278,7 +256,7 @@ func TestPointerRelay_IncrementIDConflictPropagates(t *testing.T) {
 		inc.incrementIDs[consumerName] = 99
 	}
 	h := &mockHandler{}
-	relay := must(NewPointerHandlerRelay("test-processor", store, inc, func(WorkerContext) Handler { return h }))
+	relay := NewPointerHandlerRelay("test-processor", store, inc, func(WorkerContext) Handler { return h })
 
 	err := relay.Run(context.Background())
 	if err == nil || !errors.Is(err, ErrIncrementIDConflict) {
@@ -330,7 +308,7 @@ func TestPointerRelay_WithHandleDelay(t *testing.T) {
 			store := &mockPointerStore{events: tc.events}
 			inc := newMockIncrementIDStore()
 			h := &mockHandler{}
-			relay := must(NewPointerHandlerRelay("test-processor", store, inc, func(WorkerContext) Handler { return h }, WithHandleDelay(tc.delay)))
+			relay := NewPointerHandlerRelay("test-processor", store, inc, func(WorkerContext) Handler { return h }, WithHandleDelay(tc.delay))
 
 			ctx := context.Background()
 			if tc.cancelAfter > 0 {
@@ -388,7 +366,7 @@ func TestPointerRelay_BatchDelayOptions(t *testing.T) {
 			store := &mockPointerStore{events: newEvents(1)}
 			inc := newMockIncrementIDStore()
 			h := &mockHandler{err: tc.handlerErr}
-			relay := must(NewPointerHandlerRelay("test-processor", store, inc, func(WorkerContext) Handler { return h }, tc.opts...))
+			relay := NewPointerHandlerRelay("test-processor", store, inc, func(WorkerContext) Handler { return h }, tc.opts...)
 
 			start := time.Now()
 			_ = relay.Run(context.Background())

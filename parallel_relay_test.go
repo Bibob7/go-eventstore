@@ -120,14 +120,14 @@ func TestProcessBatch_DispatchingByEntityID(t *testing.T) {
 	)
 
 	h := newMockBatchHandler()
-	relay := must(NewPointerBatchHandlerRelay(
+	relay := NewPointerBatchHandlerRelay(
 		"test-dispatch",
 		&mockPointerStore{events: events},
 		newMockIncrementIDStore(),
 		func(WorkerContext) BatchHandler { return h },
 		WithBatchSize(10),
 		WithParallelism(4),
-	))
+	)
 
 	if err := relay.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -184,14 +184,14 @@ func TestProcessBatch_CommitOncePerWorker(t *testing.T) {
 	events = newEventsByEntities(ids, entIDs)
 
 	h := newMockBatchHandler()
-	relay := must(NewPointerBatchHandlerRelay(
+	relay := NewPointerBatchHandlerRelay(
 		"test-commit-once",
 		&mockPointerStore{events: events},
 		newMockIncrementIDStore(),
 		func(WorkerContext) BatchHandler { return h },
 		WithBatchSize(10),
 		WithParallelism(4),
-	))
+	)
 
 	if err := relay.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -209,13 +209,13 @@ func TestProcessBatch_SequentialRegression(t *testing.T) {
 	store := &mockPointerStore{events: newEvents(1, 2, 3)}
 	inc := newMockIncrementIDStore()
 	h := &mockHandler{}
-	relay := must(NewPointerHandlerRelay(
+	relay := NewPointerHandlerRelay(
 		"test-seq",
 		store, inc,
 		func(WorkerContext) Handler { return h },
 		WithBatchSize(10),
 		WithParallelism(1),
-	))
+	)
 
 	if err := relay.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -237,13 +237,13 @@ func TestProcessBatch_SequentialInvokesBatchHandlerFactory(t *testing.T) {
 	store := &mockPointerStore{events: newEvents(1, 2, 3)}
 	inc := newMockIncrementIDStore()
 	h := newMockBatchHandler()
-	relay := must(NewPointerBatchHandlerRelay(
+	relay := NewPointerBatchHandlerRelay(
 		"test-seq-batch",
 		store, inc,
 		func(WorkerContext) BatchHandler { return h },
 		WithBatchSize(10),
 		WithParallelism(1),
-	))
+	)
 
 	if err := relay.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -266,13 +266,13 @@ func TestProcessBatch_SequentialCommitErrorDiscardsBatch(t *testing.T) {
 	inc := newMockIncrementIDStore()
 	h := newMockBatchHandler()
 	h.commitErr = commitErr
-	relay := must(NewPointerBatchHandlerRelay(
+	relay := NewPointerBatchHandlerRelay(
 		"test-seq-commit-err",
 		store, inc,
 		func(WorkerContext) BatchHandler { return h },
 		WithBatchSize(10),
 		WithParallelism(1),
-	))
+	)
 
 	err := relay.Run(context.Background())
 	if !errors.Is(err, commitErr) {
@@ -301,14 +301,14 @@ func TestProcessBatch_SequentialHandlerDelayAdvancesCursor(t *testing.T) {
 	store := &mockPointerStore{events: newEvents(1, 2, 3)}
 	inc := newMockIncrementIDStore()
 	h := &mockHandler{}
-	relay := must(NewPointerHandlerRelay(
+	relay := NewPointerHandlerRelay(
 		"test-seq-handler-delay",
 		store, inc,
 		func(WorkerContext) Handler { return h },
 		WithBatchSize(10),
 		WithParallelism(1),
 		WithHandleDelay(delay),
-	))
+	)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -338,14 +338,14 @@ func TestProcessBatch_SequentialBatchHandlerDelayDiscards(t *testing.T) {
 	store := &mockPointerStore{events: newEvents(1, 2, 3)}
 	inc := newMockIncrementIDStore()
 	h := newMockBatchHandler()
-	relay := must(NewPointerBatchHandlerRelay(
+	relay := NewPointerBatchHandlerRelay(
 		"test-seq-batch-delay",
 		store, inc,
 		func(WorkerContext) BatchHandler { return h },
 		WithBatchSize(10),
 		WithParallelism(1),
 		WithHandleDelay(delay),
-	))
+	)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -380,14 +380,14 @@ func TestProcessBatch_ErrEventNotReadyToProcess(t *testing.T) {
 		[]uuid.UUID{entity, entity, entity},
 	)
 	h := &mockBatchHandlerAdapter{errOnCall: 3, err: ErrEventNotReadyToProcess}
-	relay := must(NewPointerBatchHandlerRelay(
+	relay := NewPointerBatchHandlerRelay(
 		"test-notready",
 		&mockPointerStore{events: events},
 		newMockIncrementIDStore(),
 		func(WorkerContext) BatchHandler { return h },
 		WithBatchSize(10),
 		WithParallelism(4),
-	))
+	)
 
 	err := relay.Run(context.Background())
 	if !errors.Is(err, ErrEventNotReadyToProcess) {
@@ -411,14 +411,14 @@ func TestProcessBatch_HandlerErrorAbortsPool(t *testing.T) {
 		[]uuid.UUID{entity, entity, entity},
 	)
 	h := &mockBatchHandlerAdapter{errOnCall: 2, err: boom}
-	relay := must(NewPointerBatchHandlerRelay(
+	relay := NewPointerBatchHandlerRelay(
 		"test-handler-err",
 		&mockPointerStore{events: events},
 		newMockIncrementIDStore(),
 		func(WorkerContext) BatchHandler { return h },
 		WithBatchSize(10),
 		WithParallelism(4),
-	))
+	)
 
 	err := relay.Run(context.Background())
 	if !errors.Is(err, boom) {
@@ -434,14 +434,14 @@ func TestProcessBatch_CommitError(t *testing.T) {
 	events := newEvents(1, 2, 3)
 	h := newMockBatchHandler()
 	h.commitErr = commitErr
-	relay := must(NewPointerBatchHandlerRelay(
+	relay := NewPointerBatchHandlerRelay(
 		"test-commit-err",
 		&mockPointerStore{events: events},
 		newMockIncrementIDStore(),
 		func(WorkerContext) BatchHandler { return h },
 		WithBatchSize(10),
 		WithParallelism(2),
-	))
+	)
 
 	err := relay.Run(context.Background())
 	if !errors.Is(err, commitErr) {
@@ -466,14 +466,14 @@ func TestProcessBatch_ContextCancelDuringDispatch(t *testing.T) {
 		cancel()
 	}()
 
-	relay := must(NewPointerBatchHandlerRelay(
+	relay := NewPointerBatchHandlerRelay(
 		"test-ctx-cancel",
 		&mockPointerStore{events: events},
 		newMockIncrementIDStore(),
 		func(WorkerContext) BatchHandler { return h },
 		WithBatchSize(10),
 		WithParallelism(2),
-	))
+	)
 
 	start := time.Now()
 	err := relay.Run(ctx)
@@ -495,13 +495,13 @@ func TestPointerRelay_WithParallelism_4(t *testing.T) {
 	store := &mockPointerStore{events: events}
 	inc := newMockIncrementIDStore()
 	h := newMockBatchHandler()
-	relay := must(NewPointerBatchHandlerRelay(
+	relay := NewPointerBatchHandlerRelay(
 		"test-pointer-parallel",
 		store, inc,
 		func(WorkerContext) BatchHandler { return h },
 		WithBatchSize(10),
 		WithParallelism(4),
-	))
+	)
 
 	if err := relay.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -520,13 +520,13 @@ func TestTransientRelay_WithParallelism_4_CleansUpBatch(t *testing.T) {
 	events := []StoredEvent{newStoredEvent(1), newStoredEvent(2), newStoredEvent(3)}
 	store := &recordingTransientStore{mockTransientStore: mockTransientStore{events: events}}
 	h := newMockBatchHandler()
-	relay := must(NewTransientBatchHandlerRelay(
+	relay := NewTransientBatchHandlerRelay(
 		"test-transient-parallel",
 		store,
 		func(WorkerContext) BatchHandler { return h },
 		WithBatchSize(10),
 		WithParallelism(4),
-	))
+	)
 
 	if err := relay.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -607,7 +607,7 @@ func TestHandlerFactory_OneInstancePerWorker(t *testing.T) {
 		seenWorkerIDs  sync.Map
 		seenWorkerSize atomic.Int32
 	)
-	relay := must(NewPointerHandlerRelay(
+	relay := NewPointerHandlerRelay(
 		"test-handler-factory-count",
 		&mockPointerStore{events: events},
 		newMockIncrementIDStore(),
@@ -627,7 +627,7 @@ func TestHandlerFactory_OneInstancePerWorker(t *testing.T) {
 		},
 		WithBatchSize(10),
 		WithParallelism(3),
-	))
+	)
 
 	if err := relay.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -674,7 +674,7 @@ func TestHandlerFactory_DistinctInstancesPerWorker(t *testing.T) {
 	events := newEventsByEntities([]int64{1, 2, 3}, entities)
 	var instancesMu sync.Mutex
 	instances := make(map[int]*counterHandler)
-	relay := must(NewPointerHandlerRelay(
+	relay := NewPointerHandlerRelay(
 		"test-handler-factory-distinct",
 		&mockPointerStore{events: events},
 		newMockIncrementIDStore(),
@@ -690,7 +690,7 @@ func TestHandlerFactory_DistinctInstancesPerWorker(t *testing.T) {
 		},
 		WithBatchSize(10),
 		WithParallelism(3),
-	))
+	)
 
 	if err := relay.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -735,7 +735,7 @@ func TestHandlerFactory_StreamCoherenceWithFactory(t *testing.T) {
 
 	var mu sync.Mutex
 	instances := make(map[uuid.UUID][]int) // entity -> instance ids seen
-	relay := must(NewPointerHandlerRelay(
+	relay := NewPointerHandlerRelay(
 		"test-handler-factory-coherence",
 		&mockPointerStore{events: events},
 		newMockIncrementIDStore(),
@@ -751,7 +751,7 @@ func TestHandlerFactory_StreamCoherenceWithFactory(t *testing.T) {
 		},
 		WithBatchSize(10),
 		WithParallelism(4),
-	))
+	)
 
 	if err := relay.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -784,7 +784,7 @@ func TestHandlerFactory_WorkerContextMatchesWorker(t *testing.T) {
 		instancesMu sync.Mutex
 		instances   = make(map[int]*workerContextRecordingHandler)
 	)
-	relay := must(NewPointerHandlerRelay(
+	relay := NewPointerHandlerRelay(
 		"test-handler-factory-wcid",
 		&mockPointerStore{events: events},
 		newMockIncrementIDStore(),
@@ -797,7 +797,7 @@ func TestHandlerFactory_WorkerContextMatchesWorker(t *testing.T) {
 		},
 		WithBatchSize(10),
 		WithParallelism(3),
-	))
+	)
 
 	if err := relay.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -829,7 +829,7 @@ func TestHandlerFactory_WorkerCountMatchesConfigured(t *testing.T) {
 	// parallelism, regardless of how many events each worker actually sees.
 	const configured = 4
 	events := newEvents(1, 2, 3) // fewer events than workers; some workers idle
-	relay := must(NewPointerHandlerRelay(
+	relay := NewPointerHandlerRelay(
 		"test-handler-factory-count-field",
 		&mockPointerStore{events: events},
 		newMockIncrementIDStore(),
@@ -841,7 +841,7 @@ func TestHandlerFactory_WorkerCountMatchesConfigured(t *testing.T) {
 		},
 		WithBatchSize(10),
 		WithParallelism(configured),
-	))
+	)
 
 	if err := relay.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -857,7 +857,7 @@ func TestHandlerFactory_WorkerContextInSequentialMode(t *testing.T) {
 		seenCount    atomic.Int32
 		seenID       atomic.Int32
 	)
-	relay := must(NewPointerHandlerRelay(
+	relay := NewPointerHandlerRelay(
 		"test-handler-factory-sequential-wc",
 		&mockPointerStore{events: events},
 		newMockIncrementIDStore(),
@@ -869,7 +869,7 @@ func TestHandlerFactory_WorkerContextInSequentialMode(t *testing.T) {
 		},
 		WithBatchSize(10),
 		WithParallelism(1),
-	))
+	)
 
 	if err := relay.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)

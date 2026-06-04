@@ -50,16 +50,13 @@ func newTransientRelay(name string, store TransientStore, strategy batchStrategy
 //
 // factory produces one Handler instance per worker; it is invoked once
 // per worker at the start of each Run with a WorkerContext. With
-// parallelism == 1 a single instance is built. If factory is nil,
-// ErrNilFactory is returned.
+// parallelism == 1 a single instance is built. If factory is nil, the
+// first Run returns ErrNilFactory.
 //
 // The handler must be idempotent: the relay may re-deliver events in the
 // partial-progress case.
-func NewTransientHandlerRelay(name string, store TransientStore, factory func(WorkerContext) Handler, opts ...RelayOption) (Relay, error) {
-	if factory == nil {
-		return nil, fmt.Errorf("NewTransientHandlerRelay: %w", ErrNilFactory)
-	}
-	return newTransientRelay(name, store, handlerBatchStrategy{factory: factory}, opts...), nil
+func NewTransientHandlerRelay(name string, store TransientStore, factory func(WorkerContext) Handler, opts ...RelayOption) Relay {
+	return newTransientRelay(name, store, handlerBatchStrategy{factory: factory}, opts...)
 }
 
 // NewTransientBatchHandlerRelay creates a Relay backed by BatchHandlers
@@ -68,16 +65,13 @@ func NewTransientHandlerRelay(name string, store TransientStore, factory func(Wo
 //
 // factory produces one BatchHandler instance per worker; it is invoked
 // once per worker at the start of each Run with a WorkerContext. With
-// parallelism == 1 a single instance is built. If factory is nil,
-// ErrNilFactory is returned.
+// parallelism == 1 a single instance is built. If factory is nil, the
+// first Run returns ErrNilFactory.
 //
 // Strict all-or-nothing: any error leaves the batch in the store and
 // the next Run retries it.
-func NewTransientBatchHandlerRelay(name string, store TransientStore, factory func(WorkerContext) BatchHandler, opts ...RelayOption) (Relay, error) {
-	if factory == nil {
-		return nil, fmt.Errorf("NewTransientBatchHandlerRelay: %w", ErrNilFactory)
-	}
-	return newTransientRelay(name, store, batchHandlerBatchStrategy{factory: factory}, opts...), nil
+func NewTransientBatchHandlerRelay(name string, store TransientStore, factory func(WorkerContext) BatchHandler, opts ...RelayOption) Relay {
+	return newTransientRelay(name, store, batchHandlerBatchStrategy{factory: factory}, opts...)
 }
 
 func (t *transientRelay) Name() string {
@@ -85,6 +79,9 @@ func (t *transientRelay) Name() string {
 }
 
 func (t *transientRelay) Run(ctx context.Context) (err error) {
+	if err := t.strategy.validate(); err != nil {
+		return err
+	}
 	events, err := t.store.FetchBatchOfEvents(ctx, t.batchSize)
 	if err != nil {
 		return fmt.Errorf("failed to fetch events: %w", err)

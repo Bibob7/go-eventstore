@@ -49,7 +49,7 @@ func TestTransientRelay_Name(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			relay := must(NewTransientHandlerRelay(tc.relayName, &mockTransientStore{}, func(WorkerContext) Handler { return &mockHandler{} }))
+			relay := NewTransientHandlerRelay(tc.relayName, &mockTransientStore{}, func(WorkerContext) Handler { return &mockHandler{} })
 			if relay.Name() != tc.relayName {
 				t.Fatalf("expected name %q, got %q", tc.relayName, relay.Name())
 			}
@@ -127,7 +127,7 @@ func TestTransientRelay_Run(t *testing.T) {
 				cleanUpErr: tc.cleanUpErr,
 			}
 			h := &mockHandler{err: tc.handlerErr}
-			relay := must(NewTransientHandlerRelay("r", store, func(WorkerContext) Handler { return h }, tc.opts...))
+			relay := NewTransientHandlerRelay("r", store, func(WorkerContext) Handler { return h }, tc.opts...)
 
 			err := relay.Run(context.Background())
 
@@ -184,7 +184,7 @@ func TestTransientRelay_CleansUpEventsAsBatch(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &recordingTransientStore{mockTransientStore: mockTransientStore{events: tc.events}}
 			h := &countingHandler{err: tc.handlerErr, failOnCall: tc.failOnNthHandle}
-			relay := must(NewTransientHandlerRelay("r", store, func(WorkerContext) Handler { return h }))
+			relay := NewTransientHandlerRelay("r", store, func(WorkerContext) Handler { return h })
 
 			err := relay.Run(context.Background())
 			if (err != nil) != tc.wantErr {

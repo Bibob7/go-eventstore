@@ -166,6 +166,11 @@ func runParallel(
 // the relay only has to choose between them based on the configured
 // parallelism.
 type batchStrategy interface {
+	// validate reports whether the strategy is ready to run. It returns
+	// ErrNilFactory when the strategy was built with a nil handler factory,
+	// so a relay can surface the misconfiguration from Run instead of
+	// dereferencing nil mid-batch.
+	validate() error
 	// runSequential processes the whole batch on a single goroutine,
 	// returning the last successfully processed IncrementID, the processed
 	// events, and the first error (if any).
@@ -184,6 +189,13 @@ type batchStrategy interface {
 // never calls it.
 type handlerBatchStrategy struct {
 	factory func(WorkerContext) Handler
+}
+
+func (s handlerBatchStrategy) validate() error {
+	if s.factory == nil {
+		return ErrNilFactory
+	}
+	return nil
 }
 
 func (s handlerBatchStrategy) runSequential(ctx context.Context, batch []StoredEvent, delay time.Duration) (int64, []StoredEvent, error) {
@@ -233,6 +245,13 @@ func (s handlerBatchStrategy) startParallelWorker(a parallelWorkerArgs, wg *sync
 // discards the partial progress.
 type batchHandlerBatchStrategy struct {
 	factory func(WorkerContext) BatchHandler
+}
+
+func (s batchHandlerBatchStrategy) validate() error {
+	if s.factory == nil {
+		return ErrNilFactory
+	}
+	return nil
 }
 
 func (s batchHandlerBatchStrategy) runSequential(ctx context.Context, batch []StoredEvent, delay time.Duration) (int64, []StoredEvent, error) {

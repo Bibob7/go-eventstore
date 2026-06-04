@@ -226,7 +226,7 @@ func BenchmarkTransientRelay(b *testing.B) {
 			}
 
 			handler := &benchHandler{}
-			relay := must(NewTransientHandlerRelay("bench-transient", store, func(WorkerContext) Handler { return handler }, WithBatchSize(tc.batchSize)))
+			relay := NewTransientHandlerRelay("bench-transient", store, func(WorkerContext) Handler { return handler }, WithBatchSize(tc.batchSize))
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
@@ -278,7 +278,7 @@ func BenchmarkTransientRelay_AppendAndDrain(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				store := &benchTransientStore{}
-				relay := must(NewTransientHandlerRelay("bench-transient", store, func(WorkerContext) Handler { return handler }, WithBatchSize(tc.batchSize)))
+				relay := NewTransientHandlerRelay("bench-transient", store, func(WorkerContext) Handler { return handler }, WithBatchSize(tc.batchSize))
 
 				// Append a fixed payload per iteration so we measure steady-state
 				// append+relay cost rather than growing memory pressure.
@@ -337,7 +337,7 @@ func BenchmarkPointerRelay(b *testing.B) {
 			}
 
 			handler := &benchHandler{}
-			relay := must(NewPointerHandlerRelay("bench-pointer", store, incStore, func(WorkerContext) Handler { return handler }, WithBatchSize(tc.batchSize)))
+			relay := NewPointerHandlerRelay("bench-pointer", store, incStore, func(WorkerContext) Handler { return handler }, WithBatchSize(tc.batchSize))
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
@@ -379,7 +379,7 @@ func BenchmarkPointerRelay_AppendAndDrain(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				store := &benchPointerStore{}
 				incStore := newBenchIncrementIDStore()
-				relay := must(NewPointerHandlerRelay("bench-pointer", store, incStore, func(WorkerContext) Handler { return handler }, WithBatchSize(tc.batchSize)))
+				relay := NewPointerHandlerRelay("bench-pointer", store, incStore, func(WorkerContext) Handler { return handler }, WithBatchSize(tc.batchSize))
 
 				const perIter = 1_000
 				events := make([]DomainEvent, perIter)
@@ -404,7 +404,7 @@ func BenchmarkPointerRelay_Idle(b *testing.B) {
 	store := &benchPointerStore{}
 	incStore := newBenchIncrementIDStore()
 	handler := &benchHandler{}
-	relay := must(NewPointerHandlerRelay("bench-pointer-idle", store, incStore, func(WorkerContext) Handler { return handler }))
+	relay := NewPointerHandlerRelay("bench-pointer-idle", store, incStore, func(WorkerContext) Handler { return handler })
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
