@@ -1,8 +1,9 @@
 package eventstore
 
 // WorkerContext identifies which worker goroutine a factory-built
-// handler is destined for. It is passed to factories registered via
-// RegisterHandlerFactory and RegisterBatchHandler.
+// handler is destined for. It is passed to the factory supplied to
+// NewPointerHandlerRelay / NewPointerBatchHandlerRelay (and their
+// Transient counterparts).
 //
 //	ID is the zero-based worker index in [0, Count).
 //	Count is the configured parallelism (>= 1).

@@ -7,7 +7,10 @@ import (
 	"time"
 )
 
-// delayedRelay wraps a Relay and delays the next run when ErrEventNotReadyToProcess is returned.
+// ---- Relay decorators -----------------------------------------------
+
+// delayedRelay wraps a Relay and delays the next run when
+// ErrEventNotReadyToProcess is returned.
 type delayedRelay struct {
 	relay    Relay
 	waitTime time.Duration
@@ -25,16 +28,6 @@ func newDelayedRelay(relay Relay, waitTime time.Duration) Relay {
 
 func (r delayedRelay) Name() string {
 	return r.relay.Name()
-}
-
-func (r delayedRelay) RegisterHandlerFactory(factory func(WorkerContext) Handler) Relay {
-	r.relay.RegisterHandlerFactory(factory)
-	return r
-}
-
-func (r delayedRelay) RegisterBatchHandler(factory func(WorkerContext) BatchHandler) Relay {
-	r.relay.RegisterBatchHandler(factory)
-	return r
 }
 
 func (r delayedRelay) Run(ctx context.Context) error {
@@ -57,7 +50,8 @@ func (r delayedRelay) Run(ctx context.Context) error {
 	return err
 }
 
-// batchDelayedRelay wraps a Relay and adds an unconditional delay after every run.
+// batchDelayedRelay wraps a Relay and adds an unconditional delay after
+// every run.
 type batchDelayedRelay struct {
 	relay      Relay
 	batchDelay time.Duration
@@ -72,16 +66,6 @@ func newBatchDelayedRelay(relay Relay, batchDelay time.Duration) Relay {
 
 func (r batchDelayedRelay) Name() string {
 	return r.relay.Name()
-}
-
-func (r batchDelayedRelay) RegisterHandlerFactory(factory func(WorkerContext) Handler) Relay {
-	r.relay.RegisterHandlerFactory(factory)
-	return r
-}
-
-func (r batchDelayedRelay) RegisterBatchHandler(factory func(WorkerContext) BatchHandler) Relay {
-	r.relay.RegisterBatchHandler(factory)
-	return r
 }
 
 func (r batchDelayedRelay) Run(ctx context.Context) error {

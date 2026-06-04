@@ -74,25 +74,31 @@ func run() error {
 	// --- Step 2: Two independent consumers, each with their own cursor ---
 	fmt.Println("\n=== Step 2: Running two PointerRelays concurrently ===")
 
-	analyticsRelay := eventstore.NewPointerRelay(
+	analyticsRelay, err := eventstore.NewPointerHandlerRelay(
 		"analytics-consumer",
 		bundle.EventStore,
 		bundle.IncrementIDStore,
+		func(eventstore.WorkerContext) eventstore.Handler {
+			return &loggingHandler{name: "analytics"}
+		},
 		eventstore.WithBatchSize(10),
 	)
-	analyticsRelay.RegisterHandlerFactory(func(eventstore.WorkerContext) eventstore.Handler {
-		return &loggingHandler{name: "analytics"}
-	})
+	if err != nil {
+		return fmt.Errorf("create analytics relay: %w", err)
+	}
 
-	notificationRelay := eventstore.NewPointerRelay(
+	notificationRelay, err := eventstore.NewPointerHandlerRelay(
 		"notification-consumer",
 		bundle.EventStore,
 		bundle.IncrementIDStore,
+		func(eventstore.WorkerContext) eventstore.Handler {
+			return &loggingHandler{name: "notifications"}
+		},
 		eventstore.WithBatchSize(10),
 	)
-	notificationRelay.RegisterHandlerFactory(func(eventstore.WorkerContext) eventstore.Handler {
-		return &loggingHandler{name: "notifications"}
-	})
+	if err != nil {
+		return fmt.Errorf("create notification relay: %w", err)
+	}
 
 	if err := runConcurrent(ctx, analyticsRelay, notificationRelay); err != nil {
 		return err

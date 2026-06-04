@@ -226,8 +226,7 @@ func BenchmarkTransientRelay(b *testing.B) {
 			}
 
 			handler := &benchHandler{}
-			relay := NewTransientRelay("bench-transient", store, WithBatchSize(tc.batchSize))
-			relay.RegisterHandlerFactory(func(WorkerContext) Handler { return handler })
+			relay := must(NewTransientHandlerRelay("bench-transient", store, func(WorkerContext) Handler { return handler }, WithBatchSize(tc.batchSize)))
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
@@ -279,8 +278,7 @@ func BenchmarkTransientRelay_AppendAndDrain(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				store := &benchTransientStore{}
-				relay := NewTransientRelay("bench-transient", store, WithBatchSize(tc.batchSize))
-				relay.RegisterHandlerFactory(func(WorkerContext) Handler { return handler })
+				relay := must(NewTransientHandlerRelay("bench-transient", store, func(WorkerContext) Handler { return handler }, WithBatchSize(tc.batchSize)))
 
 				// Append a fixed payload per iteration so we measure steady-state
 				// append+relay cost rather than growing memory pressure.
@@ -339,7 +337,7 @@ func BenchmarkPointerRelay(b *testing.B) {
 			}
 
 			handler := &benchHandler{}
-			relay := NewPointerRelay("bench-pointer", store, incStore, WithBatchSize(tc.batchSize))
+			relay := must(NewPointerHandlerRelay("bench-pointer", store, incStore, func(WorkerContext) Handler { return handler }, WithBatchSize(tc.batchSize)))
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
@@ -381,8 +379,7 @@ func BenchmarkPointerRelay_AppendAndDrain(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				store := &benchPointerStore{}
 				incStore := newBenchIncrementIDStore()
-				relay := NewPointerRelay("bench-pointer", store, incStore, WithBatchSize(tc.batchSize))
-				relay.RegisterHandlerFactory(func(WorkerContext) Handler { return handler })
+				relay := must(NewPointerHandlerRelay("bench-pointer", store, incStore, func(WorkerContext) Handler { return handler }, WithBatchSize(tc.batchSize)))
 
 				const perIter = 1_000
 				events := make([]DomainEvent, perIter)
@@ -407,7 +404,7 @@ func BenchmarkPointerRelay_Idle(b *testing.B) {
 	store := &benchPointerStore{}
 	incStore := newBenchIncrementIDStore()
 	handler := &benchHandler{}
-	relay := NewPointerRelay("bench-pointer-idle", store, incStore)
+	relay := must(NewPointerHandlerRelay("bench-pointer-idle", store, incStore, func(WorkerContext) Handler { return handler }))
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -425,11 +422,6 @@ func BenchmarkPointerRelay_Idle(b *testing.B) {
 // and returns nil. That mirrors the contract that a no-op Run returns nil
 // when no events are available, and matches what the benchmark loop needs:
 // one batch of work followed by a no-op confirmation.
-//
-// TODO: the relay this drains is constructed without registered handlers in
-// BenchmarkParallelPointerRelay, so the second call returns nil for the
-// wrong reason. Wiring up a handler factory and replacing this with a
-// proper "loop until empty" helper is tracked separately.
 func drainPointerRelay(relay Relay, _ *benchHandler) error {
 	ctx := context.Background()
 	if err := relay.Run(ctx); err != nil {

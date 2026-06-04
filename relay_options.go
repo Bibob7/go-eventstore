@@ -2,17 +2,6 @@ package eventstore
 
 import "time"
 
-// relayConfig holds all options collected during NewPointerRelay construction.
-// It is separate from pointerRelay so that decorator-specific settings are not
-// stored on the relay itself.
-type relayConfig struct {
-	batchSize             int
-	handleDelay           time.Duration
-	batchDelay            time.Duration
-	conditionalBatchDelay time.Duration
-	parallelism           int
-}
-
 // RelayOption is a functional option for configuring a PointerRelay.
 type RelayOption func(*relayConfig)
 
@@ -53,10 +42,12 @@ func WithConditionalBatchDelay(d time.Duration) RelayOption {
 // aggregate are processed sequentially on the same worker, preserving
 // stream ordering. n must be >= 1; values < 1 are clamped to 1.
 //
-// When n > 1, factories registered via RegisterBatchHandler produce one
-// BatchHandler per worker, and Commit is invoked once per worker per batch
-// so per-batch work (e.g. AMQP publish) flushes atomically. Plain Handlers
-// returned by RegisterHandlerFactory are auto-wrapped with a no-op Commit.
+// On a BatchHandler relay, the factory produces one BatchHandler per
+// worker and Commit fires once per worker per batch. On a plain-Handler
+// relay, the factory produces one Handler per worker; the relay is strict
+// all-or-nothing in the parallel path regardless of strategy (the
+// per-EntityID partitioning makes partial per-worker progress unsafe
+// to merge into a single cursor update).
 func WithParallelism(n int) RelayOption {
 	return func(c *relayConfig) {
 		if n < 1 {

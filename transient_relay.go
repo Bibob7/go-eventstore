@@ -5,28 +5,33 @@ import (
 	"fmt"
 )
 
+// transientRelay is the Relay implementation backed by a TransientStore.
+// Events that complete successfully are removed from the store via
+// CleanUpEvents. It is agnostic to the handler kind: the batchStrategy
+// chosen at construction time (plain Handler or BatchHandler) determines
+// how each batch is dispatched.
 type transientRelay struct {
-	relayBase
-	store     TransientStore
-	batchSize int
+	relayConfig
+	name     string
+	store    TransientStore
+	strategy batchStrategy
 }
 
-// NewTransientRelay creates a Relay that fetches events from store, dispatches them
-// to registered handlers, and removes each event after successful handling.
-// The name must be unique and is used for logging. Options are shared with NewPointerRelay.
-func NewTransientRelay(name string, store TransientStore, opts ...RelayOption) Relay {
-	cfg := &relayConfig{batchSize: DefaultBatchSize}
+// newTransientRelay applies opts, wires up the requested strategy, and
+// wraps the relay in the configured delay decorators. It is shared by the
+// plain-Handler and BatchHandler constructors.
+func newTransientRelay(name string, store TransientStore, strategy batchStrategy, opts ...RelayOption) Relay {
+	cfg := &relayConfig{batchSize: DefaultBatchSize, parallelism: 1}
 	for _, opt := range opts {
 		opt(cfg)
 	}
 
-	t := &transientRelay{
-		relayBase: relayBase{name: name, handleDelay: cfg.handleDelay, parallelism: cfg.parallelism},
-		store:     store,
-		batchSize: cfg.batchSize,
+	var relay Relay = &transientRelay{
+		relayConfig: *cfg,
+		name:        name,
+		store:       store,
+		strategy:    strategy,
 	}
-
-	var relay Relay = t
 
 	if cfg.conditionalBatchDelay > 0 {
 		relay = newDelayedRelay(relay, cfg.conditionalBatchDelay)
@@ -39,18 +44,44 @@ func NewTransientRelay(name string, store TransientStore, opts ...RelayOption) R
 	return relay
 }
 
+// NewTransientHandlerRelay creates a Relay that fetches events from
+// store, dispatches them to the handler the factory produces, and
+// removes each event after successful handling.
+//
+// factory produces one Handler instance per worker; it is invoked once
+// per worker at the start of each Run with a WorkerContext. With
+// parallelism == 1 a single instance is built. If factory is nil,
+// ErrNilFactory is returned.
+//
+// The handler must be idempotent: the relay may re-deliver events in the
+// partial-progress case.
+func NewTransientHandlerRelay(name string, store TransientStore, factory func(WorkerContext) Handler, opts ...RelayOption) (Relay, error) {
+	if factory == nil {
+		return nil, fmt.Errorf("NewTransientHandlerRelay: %w", ErrNilFactory)
+	}
+	return newTransientRelay(name, store, handlerBatchStrategy{factory: factory}, opts...), nil
+}
+
+// NewTransientBatchHandlerRelay creates a Relay backed by BatchHandlers
+// that fetches events from store, dispatches them, and removes the entire
+// batch after the Commit barrier succeeds for every routed event.
+//
+// factory produces one BatchHandler instance per worker; it is invoked
+// once per worker at the start of each Run with a WorkerContext. With
+// parallelism == 1 a single instance is built. If factory is nil,
+// ErrNilFactory is returned.
+//
+// Strict all-or-nothing: any error leaves the batch in the store and
+// the next Run retries it.
+func NewTransientBatchHandlerRelay(name string, store TransientStore, factory func(WorkerContext) BatchHandler, opts ...RelayOption) (Relay, error) {
+	if factory == nil {
+		return nil, fmt.Errorf("NewTransientBatchHandlerRelay: %w", ErrNilFactory)
+	}
+	return newTransientRelay(name, store, batchHandlerBatchStrategy{factory: factory}, opts...), nil
+}
+
 func (t *transientRelay) Name() string {
 	return t.name
-}
-
-func (t *transientRelay) RegisterHandlerFactory(factory func(WorkerContext) Handler) Relay {
-	t.registerHandlerFactory(factory)
-	return t
-}
-
-func (t *transientRelay) RegisterBatchHandler(factory func(WorkerContext) BatchHandler) Relay {
-	t.registerBatchHandler(factory)
-	return t
 }
 
 func (t *transientRelay) Run(ctx context.Context) (err error) {
@@ -69,6 +100,10 @@ func (t *transientRelay) Run(ctx context.Context) (err error) {
 		}
 	}()
 
-	_, processed, err = t.processBatch(ctx, events)
+	if t.parallelism <= 1 {
+		_, processed, err = t.strategy.runSequential(ctx, events, t.handleDelay)
+	} else {
+		_, processed, err = runParallel(ctx, events, t.parallelism, t.strategy.startParallelWorker)
+	}
 	return err
 }

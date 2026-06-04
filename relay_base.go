@@ -3,64 +3,26 @@ package eventstore
 import (
 	"context"
 	"hash/fnv"
-	"log/slog"
 	"sync"
 	"time"
 )
 
-// relayBase holds common state and logic shared across relay implementations.
-type relayBase struct {
-	name                  string
-	mu                    sync.RWMutex
-	handlerFactories      []func(WorkerContext) Handler
-	batchHandlerFactories []func(WorkerContext) BatchHandler
+// relayConfig carries the knobs collected from RelayOption. It is shared
+// by every concrete relay type as an embedded field so the option
+// setters can write through a single struct. Each relay also holds a
+// single typed handler factory and a concrete strategy that closes over
+// that factory.
+type relayConfig struct {
+	batchSize             int
 	handleDelay           time.Duration
+	batchDelay            time.Duration
+	conditionalBatchDelay time.Duration
 	parallelism           int
 }
 
-func (b *relayBase) registerHandlerFactory(factory func(WorkerContext) Handler) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.handlerFactories = append(b.handlerFactories, factory)
-}
-
-func (b *relayBase) registerBatchHandler(factory func(WorkerContext) BatchHandler) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.batchHandlerFactories = append(b.batchHandlerFactories, factory)
-}
-
-func (b *relayBase) handlerFactorySnapshot() []func(WorkerContext) Handler {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	snapshot := make([]func(WorkerContext) Handler, len(b.handlerFactories))
-	copy(snapshot, b.handlerFactories)
-	return snapshot
-}
-
-func (b *relayBase) batchHandlerFactorySnapshot() []func(WorkerContext) BatchHandler {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	snapshot := make([]func(WorkerContext) BatchHandler, len(b.batchHandlerFactories))
-	copy(snapshot, b.batchHandlerFactories)
-	return snapshot
-}
-
-func (b *relayBase) waitHandleDelay(ctx context.Context) error {
-	if b.handleDelay <= 0 {
-		return nil
-	}
-	slog.Debug("Delaying next event relay", "name", b.name, "delay", b.handleDelay)
-	timer := time.NewTimer(b.handleDelay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		slog.Debug("Context done, stopping relay", "name", b.name)
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
+// name is the only piece of state that doesn't fit RelayOption — it
+// identifies the relay inside an IncrementIDStore. Each concrete relay
+// stores its own name; relayConfig itself stays option-only.
 
 // pickWorker hashes the event's EntityID to a stable worker index. The same
 // EntityID always lands on the same worker for a given n, so per-aggregate
@@ -76,7 +38,8 @@ func pickWorker(ev StoredEvent, n int) int {
 }
 
 // recordFirstErr stores err in *dst if *dst is still nil, guarded by mu.
-// Used by processBatch to collect the first handler error across workers.
+// Used by the parallel worker pool to collect the first handler error
+// across workers.
 func recordFirstErr(mu *sync.Mutex, dst *error, err error) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -85,78 +48,70 @@ func recordFirstErr(mu *sync.Mutex, dst *error, err error) {
 	}
 }
 
-// processBatch is the shared inner loop used by pointerRelay.Run and
-// transientRelay.Run. It returns:
-//   - newLastIncrementID: the IncrementID of the last event that completed
-//     every handler. Zero when nothing was processed.
-//   - processed: the events that completed every handler, in original order.
-//   - err: the first handler error, or ctx.Err().
-//
-// On parallelism <= 1 the loop is purely sequential and equivalent to the
-// pre-pool behaviour: each registered factory is invoked once with
-// WorkerContext{ID: 0, Count: 1}, then each event runs through every
-// resulting handler. The partial-progress invariant is preserved (processed
-// contains only events that fully completed).
-//
-// On parallelism > 1 events are dispatched across n goroutines via
-// fnv32a(EntityID) % n. Each goroutine invokes every HandlerFactory and
-// BatchHandlerFactory exactly once with its own WorkerContext, giving that
-// worker private handler instances. BatchHandler.Commit is invoked once per
-// worker inside its goroutine, before the WaitGroup is released — equivalent
-// to the PHP MESSAGE_SYNC_ACK barrier. The whole batch is treated as
-// all-or-nothing: on any error, processed is empty and newLastIncrementID
-// is zero, so the caller will not advance the cursor or delete events.
-func (b *relayBase) processBatch(ctx context.Context, batch []StoredEvent) (int64, []StoredEvent, error) {
-	if b.parallelism <= 1 {
-		return b.processSequential(ctx, batch)
+// waitHandleDelay pauses for d or until ctx is cancelled. A delay of 0
+// is a no-op. Strategies that need a delay call this between events.
+func waitHandleDelay(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
 	}
-	return b.processParallel(ctx, batch)
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
-// processSequential handles a single batch on the calling goroutine.
-// Factories run exactly once with WorkerContext{ID: 0, Count: 1}, plain
-// Handler returns are auto-wrapped via asBatchHandlers so the Commit loop
-// stays uniform. On any error the partial-progress invariant is preserved
-// (only events that fully completed every handler are returned in
-// processed).
-func (b *relayBase) processSequential(ctx context.Context, batch []StoredEvent) (int64, []StoredEvent, error) {
-	seqBatchHandlers := asBatchHandlers(buildHandlers(b.handlerFactorySnapshot(), WorkerContext{ID: 0, Count: 1}))
-	var processed []StoredEvent
-	var newLast int64
-	for _, ev := range batch {
-		for _, bh := range seqBatchHandlers {
-			if err := bh.Handle(ctx, ev); err != nil {
-				return newLast, processed, err
-			}
-		}
-		newLast = ev.IncrementID
-		processed = append(processed, ev)
-		if err := b.waitHandleDelay(ctx); err != nil {
-			return newLast, processed, err
-		}
-		// Commit fires after the last event of the batch, so
-		// per-worker state (e.g. an AMQP buffer) flushes once.
-		if ev.IncrementID == batch[len(batch)-1].IncrementID {
-			for _, bh := range seqBatchHandlers {
-				if err := bh.Commit(ctx); err != nil {
-					return newLast, processed, err
-				}
-			}
-		}
+// buildPlainHandler invokes the Handler factory for the given worker.
+// Returns nil when no factory is configured. Used by handlerBatchStrategy
+// for both the sequential path and per-worker factory invocation.
+func buildPlainHandler(factory func(WorkerContext) Handler, wc WorkerContext) Handler {
+	if factory == nil {
+		return nil
 	}
-	return newLast, processed, nil
+	return factory(wc)
 }
 
-// processParallel dispatches the batch across b.parallelism worker
-// goroutines, each reading from a private buffered channel. The dispatcher
-// never blocks in the happy path (buffer = len(batch)); cancel-on-error
-// drains via channel close. First error wins via recordFirstErr; the
-// returned (newLast, processed) is all-or-nothing — empty on any failure.
-func (b *relayBase) processParallel(ctx context.Context, batch []StoredEvent) (int64, []StoredEvent, error) {
-	handlerFactories := b.handlerFactorySnapshot()
-	batchFactories := b.batchHandlerFactorySnapshot()
+// buildBatchHandler invokes the BatchHandler factory for the given worker.
+// Returns nil when no factory is configured. Used by
+// batchHandlerBatchStrategy.
+func buildBatchHandler(factory func(WorkerContext) BatchHandler, wc WorkerContext) BatchHandler {
+	if factory == nil {
+		return nil
+	}
+	return factory(wc)
+}
 
-	workers := make([]chan StoredEvent, b.parallelism)
+// parallelWorkerArgs bundles the inputs that a strategy-specific worker
+// goroutine needs. The factory is typed (`Handler` or `BatchHandler`) —
+// the concrete strategy closes over the right one.
+type parallelWorkerArgs struct {
+	ctx      context.Context
+	ch       <-chan StoredEvent
+	wc       WorkerContext
+	errMu    *sync.Mutex
+	firstErr *error
+	cancel   context.CancelFunc
+}
+
+// runParallel orchestrates the worker pool: spawn one goroutine per
+// worker, dispatch each event by hash(EntityID), and wait for all workers
+// to drain. The startWorker closure is supplied by the concrete relay
+// type — it knows how to invoke the registered factories and the
+// per-event logic. The waitGroup is also created here so callers can
+// wg.Wait() after startWorker has been launched.
+//
+// ctx is wrapped in a child context so the pool can broadcast cancellation
+// to all workers when the first one errors.
+func runParallel(
+	ctx context.Context,
+	batch []StoredEvent,
+	n int,
+	startWorker func(a parallelWorkerArgs, wg *sync.WaitGroup),
+) (int64, []StoredEvent, error) {
+	workers := make([]chan StoredEvent, n)
 	for i := range workers {
 		workers[i] = make(chan StoredEvent, len(batch))
 	}
@@ -171,16 +126,13 @@ func (b *relayBase) processParallel(ctx context.Context, batch []StoredEvent) (i
 
 	for i := range workers {
 		wg.Add(1)
-		go b.runWorker(workerArgs{
-			ctx:              ctx,
-			workerID:         i,
-			ch:               workers[i],
-			ctxWorker:        WorkerContext{ID: i, Count: b.parallelism},
-			handlerFactories: handlerFactories,
-			batchFactories:   batchFactories,
-			errMu:            &errMu,
-			firstErr:         &firstErr,
-			cancel:           cancel,
+		go startWorker(parallelWorkerArgs{
+			ctx:      ctx,
+			ch:       workers[i],
+			wc:       WorkerContext{ID: i, Count: n},
+			errMu:    &errMu,
+			firstErr: &firstErr,
+			cancel:   cancel,
 		}, &wg)
 	}
 
@@ -196,62 +148,76 @@ func (b *relayBase) processParallel(ctx context.Context, batch []StoredEvent) (i
 	wg.Wait()
 
 	if firstErr != nil {
+		// Strict in the parallel path: per-EntityID partitioning means
+		// partial per-worker progress can't be merged into a single
+		// cursor update without risking lost events.
 		return 0, nil, firstErr
 	}
-	if len(batch) > 0 {
-		return batch[len(batch)-1].IncrementID, batch, nil
+	return batch[len(batch)-1].IncrementID, batch, nil
+}
+
+// --- batchStrategy ---------------------------------------------------
+
+// batchStrategy encapsulates how a batch of events is dispatched to
+// handlers. A relay holds a single strategy chosen at construction time
+// and is agnostic to which concrete implementation it runs:
+// handlerBatchStrategy (plain Handler) or batchHandlerBatchStrategy
+// (BatchHandler with a Commit barrier). Both execution paths live here so
+// the relay only has to choose between them based on the configured
+// parallelism.
+type batchStrategy interface {
+	// runSequential processes the whole batch on a single goroutine,
+	// returning the last successfully processed IncrementID, the processed
+	// events, and the first error (if any).
+	runSequential(ctx context.Context, batch []StoredEvent, delay time.Duration) (int64, []StoredEvent, error)
+	// startParallelWorker is launched once per worker goroutine by
+	// runParallel; it drains the worker's channel and applies the
+	// per-event logic.
+	startParallelWorker(a parallelWorkerArgs, wg *sync.WaitGroup)
+}
+
+// --- handlerBatchStrategy --------------------------------------------
+
+// handlerBatchStrategy powers the plain-Handler relays: partial progress
+// in the sequential path, strict in the parallel path. The factory
+// produces a plain Handler; Commit is irrelevant here so the strategy
+// never calls it.
+type handlerBatchStrategy struct {
+	factory func(WorkerContext) Handler
+}
+
+func (s handlerBatchStrategy) runSequential(ctx context.Context, batch []StoredEvent, delay time.Duration) (int64, []StoredEvent, error) {
+	handler := buildPlainHandler(s.factory, WorkerContext{ID: 0, Count: 1})
+	var (
+		processed []StoredEvent
+		newLast   int64
+	)
+	for _, ev := range batch {
+		if err := handler.Handle(ctx, ev); err != nil {
+			// Partial progress: caller may advance cursor to newLast.
+			return newLast, processed, err
+		}
+		newLast = ev.IncrementID
+		processed = append(processed, ev)
+		if err := waitHandleDelay(ctx, delay); err != nil {
+			// Partial progress on Handle-success, mid-delay cancellation:
+			// the event was handled, the next one wasn't started.
+			return newLast, processed, err
+		}
 	}
-	return 0, nil, nil
+	return newLast, processed, nil
 }
 
-// workerArgs bundles the inputs runWorker needs from processParallel.
-// Grouping them in a struct keeps the runWorker signature short and makes
-// it easy to read the call site.
-type workerArgs struct {
-	ctx              context.Context
-	workerID         int
-	ch               <-chan StoredEvent
-	ctxWorker        WorkerContext
-	handlerFactories []func(WorkerContext) Handler
-	batchFactories   []func(WorkerContext) BatchHandler
-	errMu            *sync.Mutex
-	firstErr         *error
-	cancel           context.CancelFunc
-}
-
-// runWorker is the body of a single parallel worker. It pulls events from
-// its channel, builds its private handler slice lazily on the first event
-// (so workers with no events skip both Handle and Commit and don't fire
-// factory constructors unnecessarily), then runs Handle for every routed
-// event. After the channel closes it invokes Commit once per BatchHandler
-// in registration order — the PHP MESSAGE_SYNC barrier. Any error
-// short-circuits the rest of the workers via cancel().
-func (b *relayBase) runWorker(a workerArgs, wg *sync.WaitGroup) {
+func (s handlerBatchStrategy) startParallelWorker(a parallelWorkerArgs, wg *sync.WaitGroup) {
 	defer wg.Done()
-	var perWorkerHandlers []BatchHandler
+	var handler Handler
 	sawEvent := false
 	for ev := range a.ch {
 		if !sawEvent {
-			perWorkerHandlers = append(perWorkerHandlers, asBatchHandlers(buildHandlers(a.handlerFactories, a.ctxWorker))...)
-			perWorkerHandlers = append(perWorkerHandlers, buildBatchHandlers(a.batchFactories, a.ctxWorker)...)
+			handler = buildPlainHandler(s.factory, a.wc)
 		}
 		sawEvent = true
-		for _, h := range perWorkerHandlers {
-			if err := h.Handle(a.ctx, ev); err != nil {
-				recordFirstErr(a.errMu, a.firstErr, err)
-				a.cancel()
-				return
-			}
-		}
-	}
-	// Only invoke Commit on workers that actually processed at least one
-	// event. Empty workers (closed channel that never received a dispatch)
-	// would otherwise inflate commitCalls and trigger spurious flushes.
-	if !sawEvent {
-		return
-	}
-	for _, h := range perWorkerHandlers {
-		if err := h.Commit(a.ctx); err != nil {
+		if err := handler.Handle(a.ctx, ev); err != nil {
 			recordFirstErr(a.errMu, a.firstErr, err)
 			a.cancel()
 			return
@@ -259,30 +225,66 @@ func (b *relayBase) runWorker(a workerArgs, wg *sync.WaitGroup) {
 	}
 }
 
-// buildBatchHandlers invokes each factory once with the given WorkerContext
-// and returns the resulting BatchHandler slice in registration order. If no
-// factories are registered, the slice is empty.
-func buildBatchHandlers(factories []func(WorkerContext) BatchHandler, ctxWorker WorkerContext) []BatchHandler {
-	if len(factories) == 0 {
-		return nil
-	}
-	out := make([]BatchHandler, 0, len(factories))
-	for _, f := range factories {
-		out = append(out, f(ctxWorker))
-	}
-	return out
+// --- batchHandlerBatchStrategy ---------------------------------------
+
+// batchHandlerBatchStrategy powers the BatchHandler relays: strict
+// all-or-nothing on every path. Commit fires once per worker per batch
+// after every routed event has been Handled. Any error — Handle, wait —
+// discards the partial progress.
+type batchHandlerBatchStrategy struct {
+	factory func(WorkerContext) BatchHandler
 }
 
-// buildHandlers invokes each factory once with the given WorkerContext and
-// returns the resulting Handler slice in registration order. If no factories
-// are registered, the slice is empty.
-func buildHandlers(factories []func(WorkerContext) Handler, ctxWorker WorkerContext) []Handler {
-	if len(factories) == 0 {
-		return nil
+func (s batchHandlerBatchStrategy) runSequential(ctx context.Context, batch []StoredEvent, delay time.Duration) (int64, []StoredEvent, error) {
+	handler := buildBatchHandler(s.factory, WorkerContext{ID: 0, Count: 1})
+	var (
+		processed []StoredEvent
+		newLast   int64
+	)
+	for _, ev := range batch {
+		if err := handler.Handle(ctx, ev); err != nil {
+			return 0, nil, err
+		}
+		newLast = ev.IncrementID
+		processed = append(processed, ev)
+		if err := waitHandleDelay(ctx, delay); err != nil {
+			// Commit has not yet fired; the batch is not durably
+			// processed. Discard and let the next Run retry.
+			return 0, nil, err
+		}
 	}
-	out := make([]Handler, 0, len(factories))
-	for _, f := range factories {
-		out = append(out, f(ctxWorker))
+	// Commit barrier: flushes per-batch work (e.g. AMQP publish) once
+	// after every event in the batch was handled. A Commit failure
+	// here means the barrier did not hold, so the batch is discarded.
+	if err := handler.Commit(ctx); err != nil {
+		return 0, nil, err
 	}
-	return out
+	return newLast, processed, nil
+}
+
+func (s batchHandlerBatchStrategy) startParallelWorker(a parallelWorkerArgs, wg *sync.WaitGroup) {
+	defer wg.Done()
+	var handler BatchHandler
+	sawEvent := false
+	for ev := range a.ch {
+		if !sawEvent {
+			handler = buildBatchHandler(s.factory, a.wc)
+		}
+		sawEvent = true
+		if err := handler.Handle(a.ctx, ev); err != nil {
+			recordFirstErr(a.errMu, a.firstErr, err)
+			a.cancel()
+			return
+		}
+	}
+	// Skip Commit on workers that never saw an event: a closed channel
+	// with no dispatches means the worker had nothing to flush.
+	if !sawEvent {
+		return
+	}
+	if err := handler.Commit(a.ctx); err != nil {
+		recordFirstErr(a.errMu, a.firstErr, err)
+		a.cancel()
+		return
+	}
 }

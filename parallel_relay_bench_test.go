@@ -52,12 +52,13 @@ func BenchmarkParallelPointerRelay(b *testing.B) {
 			}
 
 			handler := &benchHandler{}
-			relay := NewPointerRelay(
+			relay := must(NewPointerHandlerRelay(
 				"bench-parallel",
 				store, incStore,
+				func(WorkerContext) Handler { return handler },
 				WithBatchSize(tc.batchSize),
 				WithParallelism(tc.parallelism),
-			)
+			))
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {

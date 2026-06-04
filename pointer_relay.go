@@ -18,67 +18,39 @@ const (
 )
 
 var (
-	// ErrEventNotReadyToProcess signals that an event cannot be handled yet.
-	// Handlers should return this error to indicate a temporary condition;
-	// the relay will pause before retrying rather than treating it as a hard failure.
-	ErrEventNotReadyToProcess = errors.New("event not ready to process")
 	// ErrIncrementIDConflict signals that a stored increment ID changed between
 	// read and write, so the caller's expected previous value is no longer current.
 	ErrIncrementIDConflict = errors.New("increment id conflict")
 )
 
-// Relay fetches events from a PointerStore and dispatches them to registered handlers.
-// Use NewPointerRelay to create a Relay and call Run in a loop (e.g. via a ticker or worker pool).
-type Relay interface {
-	// Name returns the unique name of this relay, used as the consumer identifier.
-	Name() string
-	// RegisterHandlerFactory registers a factory that produces one Handler
-	// instance per worker when the relay runs with WithParallelism(n > 1).
-	// With n == 1 a single instance is built. The factory is invoked once per
-	// worker at the start of each Run with a WorkerContext identifying that
-	// worker (ID in [0, Count)), so any per-worker state (e.g. a counter or
-	// a connection) is fresh and not shared. Calling RegisterHandlerFactory
-	// multiple times appends factories; each factory's resulting Handler is
-	// invoked in registration order within a worker.
-	RegisterHandlerFactory(factory func(WorkerContext) Handler) Relay
-	// RegisterBatchHandler registers a factory that produces one
-	// BatchHandler instance per worker when the relay runs with
-	// WithParallelism(n > 1). With n == 1 a single instance is built. The
-	// factory is invoked once per worker at the start of each Run with a
-	// WorkerContext identifying that worker, so any per-worker state (e.g.
-	// an AMQP channel) is fresh and not shared. Calling RegisterBatchHandler
-	// multiple times appends factories; each factory's resulting
-	// BatchHandler is invoked in registration order within a worker.
-	RegisterBatchHandler(factory func(WorkerContext) BatchHandler) Relay
-	// Run fetches the next batch of events and dispatches them to all handlers.
-	// It returns nil when the batch is empty or fully processed.
-	Run(ctx context.Context) error
-}
-
+// pointerRelay is the cursor-based Relay implementation backed by a
+// PointerStore + IncrementIDStore. It is agnostic to the handler kind:
+// the batchStrategy chosen at construction time (plain Handler or
+// BatchHandler) determines how each batch is dispatched.
 type pointerRelay struct {
-	relayBase
+	relayConfig
+	name             string
 	eventStore       PointerStore
 	incrementIDStore IncrementIDStore
-	batchSize        int
+	strategy         batchStrategy
 }
 
-// NewPointerRelay creates a cursor-based Relay that reads from store and tracks
-// its position in incrementIDStore. The name must be unique across all relays
-// sharing the same IncrementIDStore.
-func NewPointerRelay(name string, store PointerStore, incrementIDStore IncrementIDStore, opts ...RelayOption) Relay {
-	cfg := &relayConfig{batchSize: DefaultBatchSize}
+// newPointerRelay applies opts, wires up the requested strategy, and
+// wraps the relay in the configured delay decorators. It is shared by the
+// plain-Handler and BatchHandler constructors.
+func newPointerRelay(name string, store PointerStore, incrementIDStore IncrementIDStore, strategy batchStrategy, opts ...RelayOption) Relay {
+	cfg := &relayConfig{batchSize: DefaultBatchSize, parallelism: 1}
 	for _, opt := range opts {
 		opt(cfg)
 	}
 
-	p := &pointerRelay{
-		relayBase:        relayBase{name: name, handleDelay: cfg.handleDelay, parallelism: cfg.parallelism},
+	var relay Relay = &pointerRelay{
+		relayConfig:      *cfg,
+		name:             name,
 		eventStore:       store,
 		incrementIDStore: incrementIDStore,
-		batchSize:        cfg.batchSize,
+		strategy:         strategy,
 	}
-
-	var relay Relay = p
 
 	if cfg.conditionalBatchDelay > 0 {
 		relay = newDelayedRelay(relay, cfg.conditionalBatchDelay)
@@ -91,18 +63,59 @@ func NewPointerRelay(name string, store PointerStore, incrementIDStore Increment
 	return relay
 }
 
+// NewPointerHandlerRelay creates a cursor-based Relay that reads from
+// store and tracks its position in incrementIDStore. The name must be
+// unique across all relays sharing the same IncrementIDStore.
+//
+// factory produces one Handler instance per worker; it is invoked once
+// per worker at the start of each Run with a WorkerContext identifying
+// that worker (ID in [0, Count)), so any per-worker state is fresh and
+// not shared. With parallelism == 1 a single instance is built. If
+// factory is nil, ErrNilFactory is returned.
+//
+// Cursor semantics: partial progress is allowed in the sequential path
+// (parallelism <= 1). If a Handle call fails mid-batch, the cursor
+// advances up to the last successfully processed event so the next Run
+// resumes from there. In the parallel path (parallelism > 1) the relay
+// is strict all-or-nothing because the per-EntityID partitioning makes
+// per-worker partial progress unsafe to merge into a single cursor
+// update.
+//
+// The handler must be idempotent: the relay may re-deliver events in the
+// partial-progress case (e.g. when the context is cancelled between two
+// Handle calls and the cursor was advanced to the last successful event
+// on the previous Run).
+func NewPointerHandlerRelay(name string, store PointerStore, incrementIDStore IncrementIDStore, factory func(WorkerContext) Handler, opts ...RelayOption) (Relay, error) {
+	if factory == nil {
+		return nil, fmt.Errorf("NewPointerHandlerRelay: %w", ErrNilFactory)
+	}
+	return newPointerRelay(name, store, incrementIDStore, handlerBatchStrategy{factory: factory}, opts...), nil
+}
+
+// NewPointerBatchHandlerRelay creates a cursor-based Relay backed by
+// BatchHandlers that reads from store and tracks its position in
+// incrementIDStore. The name must be unique across all relays sharing
+// the same IncrementIDStore.
+//
+// factory produces one BatchHandler instance per worker; it is invoked
+// once per worker at the start of each Run with a WorkerContext
+// identifying that worker, so any per-worker state (e.g. an AMQP channel)
+// is fresh and not shared. With parallelism == 1 a single instance is
+// built. If factory is nil, ErrNilFactory is returned.
+//
+// Strict all-or-nothing: the cursor is advanced only when the entire
+// batch (Handle for every event plus Commit for every BatchHandler)
+// completed successfully. Any failure leaves the cursor where it was
+// and the next Run retries the same batch.
+func NewPointerBatchHandlerRelay(name string, store PointerStore, incrementIDStore IncrementIDStore, factory func(WorkerContext) BatchHandler, opts ...RelayOption) (Relay, error) {
+	if factory == nil {
+		return nil, fmt.Errorf("NewPointerBatchHandlerRelay: %w", ErrNilFactory)
+	}
+	return newPointerRelay(name, store, incrementIDStore, batchHandlerBatchStrategy{factory: factory}, opts...), nil
+}
+
 func (p *pointerRelay) Name() string {
 	return p.name
-}
-
-func (p *pointerRelay) RegisterHandlerFactory(factory func(WorkerContext) Handler) Relay {
-	p.registerHandlerFactory(factory)
-	return p
-}
-
-func (p *pointerRelay) RegisterBatchHandler(factory func(WorkerContext) BatchHandler) Relay {
-	p.registerBatchHandler(factory)
-	return p
 }
 
 func (p *pointerRelay) Run(ctx context.Context) (err error) {
@@ -133,7 +146,11 @@ func (p *pointerRelay) Run(ctx context.Context) (err error) {
 		}
 	}()
 
-	newLastIncrementID, _, err = p.processBatch(ctx, storedEvents)
+	if p.parallelism <= 1 {
+		newLastIncrementID, _, err = p.strategy.runSequential(ctx, storedEvents, p.handleDelay)
+	} else {
+		newLastIncrementID, _, err = runParallel(ctx, storedEvents, p.parallelism, p.strategy.startParallelWorker)
+	}
 	if newLastIncrementID > 0 {
 		processed = true
 	}
