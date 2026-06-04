@@ -84,14 +84,16 @@ bundle := mysqlstore.NewEventStoreBundle(db, mysqlstore.Config{
     IncrementIDTableName: "event_increment_id",
 })
 
-relay := eventstore.NewPointerRelay(
+relay := eventstore.NewPointerHandlerRelay(
     "order-relay",
     bundle.EventStore,
     bundle.IncrementIDStore,
+    func(eventstore.WorkerContext) eventstore.Handler {
+        return &NotifyHandler{}
+    },
     eventstore.WithBatchSize(50),
     eventstore.WithConditionalBatchDelay(2*time.Second),
 )
-relay.RegisterHandler(&NotifyHandler{})
 
 // run in a loop, e.g. with a ticker
 for {
@@ -102,25 +104,29 @@ for {
 }
 ```
 
-> When using `WithParallelism(n)` with `n > 1`, register handlers via the
-> factory methods (`RegisterHandlerFactory` / `RegisterBatchHandler`) so
-> each worker gets its own private instance — see
-> [Parallel relay](#parallel-relay-worker-pool). Plain `Handler`s passed to
-> `RegisterHandler` are still shared across workers and must be safe for
-> concurrent use. Handlers that implement `BatchHandler` get a per-worker
-> `Commit` barrier; plain handlers are auto-wrapped with a no-op `Commit`.
+The relay is built around a *factory*: `func(eventstore.WorkerContext) eventstore.Handler`. The factory produces one handler instance per worker, so per-worker state is never shared by accident — see [Parallel relay](#parallel-relay-worker-pool).
+
+> When using `WithParallelism(n)` with `n > 1`, the factory is invoked once
+> per worker, so each worker gets its own private instance. If your factory
+> returns the *same* instance to every worker, that instance is shared
+> across goroutines and must be safe for concurrent use. Handlers that need
+> per-batch atomicity (a flush after all of a worker's events are handled)
+> implement `BatchHandler` and are registered via
+> `NewPointerBatchHandlerRelay` / `NewTransientBatchHandlerRelay`.
 
 ### 5. Alternatively: TransientRelay
 
 A `TransientRelay` deletes each event from the store after all handlers have processed it successfully. Useful when the outbox should not grow indefinitely and no separate cleanup job is desired.
 
 ```go
-relay := eventstore.NewTransientRelay(
+relay := eventstore.NewTransientHandlerRelay(
     "order-relay",
     bundle.EventStore, // EventStore also implements CleanUpStore
+    func(eventstore.WorkerContext) eventstore.Handler {
+        return &NotifyHandler{}
+    },
     eventstore.WithBatchSize(50),
 )
-relay.RegisterHandler(&NotifyHandler{})
 ```
 
 ## Relay options
@@ -147,35 +153,44 @@ relay.RegisterHandler(&NotifyHandler{})
 
 For high-throughput outbox consumers, `WithParallelism(n)` shards each batch across `n` worker goroutines. Events are routed to workers by hashing the event's `EntityID` with `fnv32a`, so all events of a given aggregate are processed sequentially on the same worker — preserving per-stream ordering while running different aggregates in parallel.
 
-### Per-worker state: use factories
+### Per-worker state: the factory
 
-When the same handler instance is shared across workers, anything the handler does in `Handle` (or `Commit`) is concurrently called by all workers. To avoid contention, register handlers via the factory methods so each worker gets its own private instance:
+The handler factory you pass to the constructor is invoked once per worker, with a `WorkerContext` (`ID` in `[0, Count)`, `Count` = parallelism). Returning a fresh instance per call gives each worker private state, so anything the handler does in `Handle` (or `Commit`) is never shared across goroutines:
 
 ```go
-relay := eventstore.NewPointerRelay(
+relay := eventstore.NewPointerHandlerRelay(
     "high-throughput-relay",
     bundle.EventStore,
     bundle.IncrementIDStore,
+    func(wc eventstore.WorkerContext) eventstore.Handler {
+        // Per-worker instance: each worker gets its own connection.
+        return &MyHandler{db: openPerWorkerDBConnection()}
+    },
     eventstore.WithBatchSize(200),
     eventstore.WithParallelism(4),
 )
-
-// Per-worker instance: the factory runs once per worker, so each worker
-// gets its own *AMQPPublisher (e.g. with a private AMQP channel).
-relay.RegisterHandlerFactory(func() eventstore.Handler {
-    return &MyHandler{db: openPerWorkerDBConnection()}
-})
-
-relay.RegisterBatchHandler(func() eventstore.BatchHandler {
-    return &AMQPPublisher{channel: openPerWorkerAMQPChannel()}
-})
 ```
 
-A plain handler passed via `RegisterHandler` is still shared across workers — the user is responsible for making it safe for concurrent use. Use the factory variants whenever your handler holds mutable state, a connection, or any resource that should not be shared.
+If your factory returns the *same* instance to every worker, that instance is shared across all workers and you are responsible for making it safe for concurrent use. Return a fresh instance whenever your handler holds mutable state, a connection, or any resource that should not be shared.
+
+> Note: `WithHandleDelay` (the pause between individual events) only applies on the sequential path (`WithParallelism(1)`); it is not enforced inside the parallel worker loop.
 
 ### BatchHandler and the per-worker commit barrier
 
-Handlers that need per-batch atomicity (e.g. an AMQP publisher that buffers messages and flushes them once per worker per batch) implement `BatchHandler`:
+Handlers that need per-batch atomicity (e.g. an AMQP publisher that buffers messages and flushes them once per worker per batch) implement `BatchHandler` and are wired up with `NewPointerBatchHandlerRelay` / `NewTransientBatchHandlerRelay`:
+
+```go
+relay := eventstore.NewPointerBatchHandlerRelay(
+    "amqp-relay",
+    bundle.EventStore,
+    bundle.IncrementIDStore,
+    func(wc eventstore.WorkerContext) eventstore.BatchHandler {
+        return &AMQPPublisher{channel: openPerWorkerAMQPChannel()}
+    },
+    eventstore.WithBatchSize(200),
+    eventstore.WithParallelism(4),
+)
+```
 
 ```go
 type AMQPPublisher struct{ /* ... */ }
@@ -193,7 +208,7 @@ func (p *AMQPPublisher) Commit(ctx context.Context) error {
 
 `Commit(ctx)` is invoked once per worker after all of its events have been processed, before the relay advances the cursor (or, for `TransientRelay`, calls `CleanUpEvents`). This mirrors the PHP `MESSAGE_SYNC` / `MESSAGE_SYNC_ACK` barrier: per-worker work flushes atomically, then the next batch starts. If any handler returns an error, the pool cancels, no `Commit` runs, and the error propagates from `Run` so the surrounding retry loop can resume from the last committed position.
 
-Plain `Handler`s (and `RegisterHandlerFactory` instances) are auto-wrapped with a no-op `Commit`, so existing handlers keep working unchanged. With `n == 1` (the default) the relay runs sequentially and behaves exactly as before, and `Commit` fires once after the last event of the batch.
+Plain `Handler` relays (`NewPointerHandlerRelay` / `NewTransientHandlerRelay`) have no `Commit` barrier — reach for a `BatchHandler` relay only when you need one. With `n == 1` (the default) a `BatchHandler` relay runs sequentially and `Commit` fires once after the last event of the batch.
 
 ## Examples
 

@@ -927,3 +927,80 @@ func (r *recordingHandler) Handle(ctx context.Context, ev StoredEvent) error {
 	}
 	return nil
 }
+
+// seqIDs returns the increment IDs 1..n, used to seed a batch large enough
+// that a cancelled context is virtually certain to interrupt dispatch.
+func seqIDs(n int) []int64 {
+	ids := make([]int64, n)
+	for i := range ids {
+		ids[i] = int64(i + 1)
+	}
+	return ids
+}
+
+// TestRunParallel_CancelledContextDiscardsBatch is a regression test: when
+// the context is already cancelled as a parallel batch is dispatched,
+// runParallel must report the cancellation and NOT mark the batch as
+// processed. Otherwise the pointer cursor advances (or the transient store
+// cleans up) events that were never handled, silently losing them.
+func TestRunParallel_CancelledContextDiscardsBatch(t *testing.T) {
+	const batch = 100
+	cases := []struct {
+		name  string
+		check func(t *testing.T)
+	}{
+		{
+			name: "pointer relay keeps cursor at zero",
+			check: func(t *testing.T) {
+				store := &mockPointerStore{events: newEvents(seqIDs(batch)...)}
+				inc := newMockIncrementIDStore()
+				relay := NewPointerHandlerRelay(
+					"cancel-pointer",
+					store, inc,
+					func(WorkerContext) Handler { return &mockHandler{} },
+					WithBatchSize(batch),
+					WithParallelism(4),
+				)
+
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+
+				if err := relay.Run(ctx); !errors.Is(err, context.Canceled) {
+					t.Fatalf("expected context.Canceled, got %v", err)
+				}
+				if id, _ := inc.GetIncrementID(context.Background(), "cancel-pointer"); id != 0 {
+					t.Errorf("expected cursor to stay at 0, got %d", id)
+				}
+			},
+		},
+		{
+			name: "transient relay cleans up nothing",
+			check: func(t *testing.T) {
+				store := &mockTransientStore{events: newEvents(seqIDs(batch)...)}
+				relay := NewTransientHandlerRelay(
+					"cancel-transient",
+					store,
+					func(WorkerContext) Handler { return &mockHandler{} },
+					WithBatchSize(batch),
+					WithParallelism(4),
+				)
+
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+
+				if err := relay.Run(ctx); !errors.Is(err, context.Canceled) {
+					t.Fatalf("expected context.Canceled, got %v", err)
+				}
+				if len(store.cleanedUp) != 0 {
+					t.Errorf("expected no cleaned-up events, got %d", len(store.cleanedUp))
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.check(t)
+		})
+	}
+}

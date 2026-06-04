@@ -136,10 +136,21 @@ func runParallel(
 		}, &wg)
 	}
 
+	var dispatchErr error
 	for _, ev := range batch {
 		select {
 		case workers[pickWorker(ev, len(workers))] <- ev:
 		case <-ctx.Done():
+			// The context was cancelled mid-dispatch. Stop handing out
+			// events: reporting success here would advance the cursor
+			// (or clean up events) for a batch whose remaining events
+			// were never dispatched, silently losing them. Record the
+			// cancellation and fall through to drain the workers we
+			// already started so they don't leak.
+			dispatchErr = ctx.Err()
+		}
+		if dispatchErr != nil {
+			break
 		}
 	}
 	for _, ch := range workers {
@@ -147,10 +158,15 @@ func runParallel(
 	}
 	wg.Wait()
 
+	// Strict in the parallel path: per-EntityID partitioning means partial
+	// per-worker progress can't be merged into a single cursor update
+	// without risking lost events. Any error — a cancelled dispatch or a
+	// handler/Commit failure — discards the whole batch so the next Run
+	// retries it from the last committed position.
+	if dispatchErr != nil {
+		return 0, nil, dispatchErr
+	}
 	if firstErr != nil {
-		// Strict in the parallel path: per-EntityID partitioning means
-		// partial per-worker progress can't be merged into a single
-		// cursor update without risking lost events.
 		return 0, nil, firstErr
 	}
 	return batch[len(batch)-1].IncrementID, batch, nil
