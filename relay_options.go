@@ -13,14 +13,6 @@ func WithBatchSize(batchSize int) RelayOption {
 	}
 }
 
-// WithHandleDelay inserts a pause between processing individual events within a batch.
-// Useful for rate-limiting or giving downstream systems time to react.
-func WithHandleDelay(delay time.Duration) RelayOption {
-	return func(c *relayConfig) {
-		c.handleDelay = delay
-	}
-}
-
 // WithBatchDelay sets an unconditional delay between every relay run.
 // The relay waits this duration after each batch, regardless of the result.
 func WithBatchDelay(d time.Duration) RelayOption {

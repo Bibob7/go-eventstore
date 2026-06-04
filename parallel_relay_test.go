@@ -280,77 +280,93 @@ func TestProcessBatch_SequentialCommitErrorDiscardsBatch(t *testing.T) {
 	}
 }
 
-func TestProcessBatch_SequentialHandlerDelayAdvancesCursor(t *testing.T) {
-	// On a plain-Handler relay the waitHandleDelay cancellation between two
-	// events is reported as partial progress: the cursor advances to the
-	// last successfully processed event. Handlers are expected to be
-	// idempotent so the next Run can safely re-deliver from there.
-	delay := 200 * time.Millisecond
-	cancelAfter := 30 * time.Millisecond
+// cancelOnNthHandler cancels its context once it has handled n events, so
+// tests can land a cancellation at a deterministic point mid-batch without
+// relying on timing.
+type cancelOnNthHandler struct {
+	n      int
+	calls  int
+	cancel context.CancelFunc
+}
 
+func (h *cancelOnNthHandler) Name() string { return "cancel-on-nth" }
+
+func (h *cancelOnNthHandler) Handle(_ context.Context, _ StoredEvent) error {
+	h.calls++
+	if h.calls == h.n {
+		h.cancel()
+	}
+	return nil
+}
+
+// cancelOnNthBatchHandler is the BatchHandler variant; it records Commit
+// calls so tests can assert the barrier never fired.
+type cancelOnNthBatchHandler struct {
+	cancelOnNthHandler
+	commitCalls int
+}
+
+func (h *cancelOnNthBatchHandler) Commit(_ context.Context) error {
+	h.commitCalls++
+	return nil
+}
+
+func TestProcessBatch_SequentialHandlerCancelAdvancesCursor(t *testing.T) {
+	// On a plain-Handler relay, a cancellation observed between two events
+	// is reported as partial progress: the cursor advances to the last
+	// successfully processed event. Handlers are expected to be idempotent
+	// so the next Run can safely re-deliver from there.
 	store := &mockPointerStore{events: newEvents(1, 2, 3)}
 	inc := newMockIncrementIDStore()
-	h := &mockHandler{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel right after the first event is handled; the loop hits the
+	// cancellation checkpoint before reaching the second event.
+	h := &cancelOnNthHandler{n: 1, cancel: cancel}
 	relay := NewPointerHandlerRelay(
-		"test-seq-handler-delay",
+		"test-seq-handler-cancel",
 		store, inc,
 		func(WorkerContext) Handler { return h },
 		WithBatchSize(10),
 		WithParallelism(1),
-		WithHandleDelay(delay),
 	)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(cancelAfter)
-		cancel()
-	}()
 
 	err := relay.Run(ctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
-	// Event 1 was processed before the delay started. With partial
-	// progress the cursor advances to its IncrementID.
-	lastID, _ := inc.GetIncrementID(context.Background(), "test-seq-handler-delay")
+	// With partial progress the cursor advances to the last handled event.
+	lastID, _ := inc.GetIncrementID(context.Background(), "test-seq-handler-cancel")
 	if lastID != 1 {
-		t.Errorf("expected cursor to advance to 1 (last event before delay), got %d", lastID)
+		t.Errorf("expected cursor to advance to 1 (last handled event), got %d", lastID)
 	}
 }
 
-func TestProcessBatch_SequentialBatchHandlerDelayDiscards(t *testing.T) {
-	// On a BatchHandlerRelay the waitHandleDelay cancellation must NOT
-	// advance the cursor: the per-batch Commit barrier has not yet fired,
-	// so the batch is not durably processed and must be retried.
-	delay := 200 * time.Millisecond
-	cancelAfter := 30 * time.Millisecond
-
+func TestProcessBatch_SequentialBatchHandlerCancelDiscards(t *testing.T) {
+	// On a BatchHandler relay a mid-batch cancellation must NOT advance the
+	// cursor: the per-batch Commit barrier has not yet fired, so the batch
+	// is not durably processed and must be retried.
 	store := &mockPointerStore{events: newEvents(1, 2, 3)}
 	inc := newMockIncrementIDStore()
-	h := newMockBatchHandler()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	h := &cancelOnNthBatchHandler{cancelOnNthHandler: cancelOnNthHandler{n: 1, cancel: cancel}}
 	relay := NewPointerBatchHandlerRelay(
-		"test-seq-batch-delay",
+		"test-seq-batch-cancel",
 		store, inc,
 		func(WorkerContext) BatchHandler { return h },
 		WithBatchSize(10),
 		WithParallelism(1),
-		WithHandleDelay(delay),
 	)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(cancelAfter)
-		cancel()
-	}()
 
 	err := relay.Run(ctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
 	// Cursor must stay at 0 — strict all-or-nothing.
-	lastID, _ := inc.GetIncrementID(context.Background(), "test-seq-batch-delay")
+	lastID, _ := inc.GetIncrementID(context.Background(), "test-seq-batch-cancel")
 	if lastID != 0 {
-		t.Errorf("expected cursor to stay at 0 after delay cancellation, got %d", lastID)
+		t.Errorf("expected cursor to stay at 0 after cancellation, got %d", lastID)
 	}
 	// Commit must never have fired.
 	if h.commitCalls != 0 {

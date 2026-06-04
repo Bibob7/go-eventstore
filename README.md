@@ -134,7 +134,6 @@ relay := eventstore.NewTransientHandlerRelay(
 | Option | Purpose |
 |---|---|
 | `WithBatchSize(n)` | Max events fetched per `Run` (default `DefaultBatchSize`). |
-| `WithHandleDelay(d)` | Pause between individual events within a batch. |
 | `WithBatchDelay(d)` | Unconditional delay between batches. |
 | `WithConditionalBatchDelay(d)` | Delay applied only when a handler returns `ErrEventNotReadyToProcess`. |
 | `WithParallelism(n)` | Run handler calls across `n` worker goroutines partitioned by `EntityID` (default `1`). See [Parallel relay](#parallel-relay-worker-pool) below. |
@@ -162,8 +161,6 @@ relay := eventstore.NewPointerHandlerRelay(
 ```
 
 If your factory returns the *same* instance to every worker, that instance is shared across all workers and you are responsible for making it safe for concurrent use. Return a fresh instance whenever your handler holds mutable state, a connection, or any resource that should not be shared.
-
-> Note: `WithHandleDelay` (the pause between individual events) only applies on the sequential path (`WithParallelism(1)`); it is not enforced inside the parallel worker loop.
 
 ### BatchHandler and the per-worker commit barrier
 

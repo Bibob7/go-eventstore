@@ -146,7 +146,7 @@ func (p *pointerRelay) Run(ctx context.Context) (err error) {
 	}()
 
 	if p.parallelism <= 1 {
-		newLastIncrementID, _, err = p.strategy.runSequential(ctx, storedEvents, p.handleDelay)
+		newLastIncrementID, _, err = p.strategy.runSequential(ctx, storedEvents)
 	} else {
 		newLastIncrementID, _, err = runParallel(ctx, storedEvents, p.parallelism, p.strategy.startParallelWorker)
 	}

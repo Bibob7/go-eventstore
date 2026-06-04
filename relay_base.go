@@ -14,7 +14,6 @@ import (
 // that factory.
 type relayConfig struct {
 	batchSize             int
-	handleDelay           time.Duration
 	batchDelay            time.Duration
 	conditionalBatchDelay time.Duration
 	parallelism           int
@@ -41,22 +40,6 @@ func recordFirstErr(mu *sync.Mutex, dst *error, err error) {
 	defer mu.Unlock()
 	if *dst == nil {
 		*dst = err
-	}
-}
-
-// waitHandleDelay pauses for d or until ctx is cancelled. A delay of 0
-// is a no-op. Strategies that need a delay call this between events.
-func waitHandleDelay(ctx context.Context, d time.Duration) error {
-	if d <= 0 {
-		return nil
-	}
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
 	}
 }
 
@@ -185,8 +168,9 @@ type batchStrategy interface {
 	validate() error
 	// runSequential processes the whole batch on a single goroutine,
 	// returning the last successfully processed IncrementID, the processed
-	// events, and the first error (if any).
-	runSequential(ctx context.Context, batch []StoredEvent, delay time.Duration) (int64, []StoredEvent, error)
+	// events, and the first error (if any). It honours ctx cancellation
+	// between events.
+	runSequential(ctx context.Context, batch []StoredEvent) (int64, []StoredEvent, error)
 	// startParallelWorker is launched once per worker goroutine by
 	// runParallel; it drains the worker's channel and applies the
 	// per-event logic.
@@ -210,24 +194,24 @@ func (s handlerBatchStrategy) validate() error {
 	return nil
 }
 
-func (s handlerBatchStrategy) runSequential(ctx context.Context, batch []StoredEvent, delay time.Duration) (int64, []StoredEvent, error) {
+func (s handlerBatchStrategy) runSequential(ctx context.Context, batch []StoredEvent) (int64, []StoredEvent, error) {
 	handler := buildPlainHandler(s.factory, WorkerContext{ID: 0, Count: 1})
 	var (
 		processed []StoredEvent
 		newLast   int64
 	)
 	for _, ev := range batch {
+		// Honour cancellation between events: report partial progress so the
+		// caller advances the cursor to the last successfully handled event.
+		if err := ctx.Err(); err != nil {
+			return newLast, processed, err
+		}
 		if err := handler.Handle(ctx, ev); err != nil {
 			// Partial progress: caller may advance cursor to newLast.
 			return newLast, processed, err
 		}
 		newLast = ev.IncrementID
 		processed = append(processed, ev)
-		if err := waitHandleDelay(ctx, delay); err != nil {
-			// Partial progress on Handle-success, mid-delay cancellation:
-			// the event was handled, the next one wasn't started.
-			return newLast, processed, err
-		}
 	}
 	return newLast, processed, nil
 }
@@ -253,8 +237,8 @@ func (s handlerBatchStrategy) startParallelWorker(a parallelWorkerArgs, wg *sync
 
 // batchHandlerBatchStrategy powers the BatchHandler relays: strict
 // all-or-nothing on every path. Commit fires once per worker per batch
-// after every routed event has been Handled. Any error — Handle, wait —
-// discards the partial progress.
+// after every routed event has been Handled. Any error — Handle, Commit,
+// or cancellation — discards the partial progress.
 type batchHandlerBatchStrategy struct {
 	factory func(WorkerContext) BatchHandler
 }
@@ -266,23 +250,24 @@ func (s batchHandlerBatchStrategy) validate() error {
 	return nil
 }
 
-func (s batchHandlerBatchStrategy) runSequential(ctx context.Context, batch []StoredEvent, delay time.Duration) (int64, []StoredEvent, error) {
+func (s batchHandlerBatchStrategy) runSequential(ctx context.Context, batch []StoredEvent) (int64, []StoredEvent, error) {
 	handler := buildBatchHandler(s.factory, WorkerContext{ID: 0, Count: 1})
 	var (
 		processed []StoredEvent
 		newLast   int64
 	)
 	for _, ev := range batch {
+		// Honour cancellation between events. The Commit barrier has not
+		// fired yet, so the batch is not durably processed: discard it and
+		// let the next Run retry.
+		if err := ctx.Err(); err != nil {
+			return 0, nil, err
+		}
 		if err := handler.Handle(ctx, ev); err != nil {
 			return 0, nil, err
 		}
 		newLast = ev.IncrementID
 		processed = append(processed, ev)
-		if err := waitHandleDelay(ctx, delay); err != nil {
-			// Commit has not yet fired; the batch is not durably
-			// processed. Discard and let the next Run retry.
-			return 0, nil, err
-		}
 	}
 	// Commit barrier: flushes per-batch work (e.g. AMQP publish) once
 	// after every event in the batch was handled. A Commit failure

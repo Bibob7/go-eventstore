@@ -100,7 +100,7 @@ func (t *transientRelay) Run(ctx context.Context) (err error) {
 	}()
 
 	if t.parallelism <= 1 {
-		_, processed, err = t.strategy.runSequential(ctx, events, t.handleDelay)
+		_, processed, err = t.strategy.runSequential(ctx, events)
 	} else {
 		_, processed, err = runParallel(ctx, events, t.parallelism, t.strategy.startParallelWorker)
 	}

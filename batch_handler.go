@@ -12,7 +12,7 @@ import "context"
 // (NewPointerBatchHandlerRelay / NewTransientBatchHandlerRelay). The
 // relay is strict all-or-nothing: Commit is invoked once per worker
 // per batch, after that worker has finished Handle() for all its
-// assigned events, and any error — Handle, Commit, or waitHandleDelay
+// assigned events, and any error — Handle, Commit, or context
 // cancellation — discards the batch so the next Run retries it.
 type BatchHandler interface {
 	Handler
