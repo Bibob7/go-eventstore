@@ -48,10 +48,11 @@ func newTransientRelay(name string, store TransientStore, strategy batchStrategy
 // store, dispatches them to the handler the factory produces, and
 // removes each event after successful handling.
 //
-// factory produces one Handler instance per worker; it is invoked once
-// per worker at the start of each Run with a WorkerContext. With
-// parallelism == 1 a single instance is built. If factory is nil, the
-// first Run returns ErrNilFactory.
+// factory produces one Handler instance per worker; within a Run it is
+// invoked the first time a worker is handed an event, with a
+// WorkerContext. Workers that receive no events never invoke the factory.
+// With parallelism == 1 a single instance is built. If factory is nil,
+// the first Run returns ErrNilFactory.
 //
 // The handler must be idempotent: the relay may re-deliver events in the
 // partial-progress case.
@@ -63,10 +64,11 @@ func NewTransientHandlerRelay(name string, store TransientStore, factory func(Wo
 // that fetches events from store, dispatches them, and removes the entire
 // batch after the Commit barrier succeeds for every routed event.
 //
-// factory produces one BatchHandler instance per worker; it is invoked
-// once per worker at the start of each Run with a WorkerContext. With
-// parallelism == 1 a single instance is built. If factory is nil, the
-// first Run returns ErrNilFactory.
+// factory produces one BatchHandler instance per worker; within a Run it
+// is invoked the first time a worker is handed an event, with a
+// WorkerContext. Workers that receive no events never invoke the factory.
+// With parallelism == 1 a single instance is built. If factory is nil,
+// the first Run returns ErrNilFactory.
 //
 // Strict all-or-nothing: any error leaves the batch in the store and
 // the next Run retries it.

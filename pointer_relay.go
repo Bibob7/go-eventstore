@@ -67,11 +67,12 @@ func newPointerRelay(name string, store PointerStore, incrementIDStore Increment
 // store and tracks its position in incrementIDStore. The name must be
 // unique across all relays sharing the same IncrementIDStore.
 //
-// factory produces one Handler instance per worker; it is invoked once
-// per worker at the start of each Run with a WorkerContext identifying
-// that worker (ID in [0, Count)), so any per-worker state is fresh and
-// not shared. With parallelism == 1 a single instance is built. If
-// factory is nil, the first Run returns ErrNilFactory.
+// factory produces one Handler instance per worker; within a Run it is
+// invoked the first time a worker is handed an event, with a WorkerContext
+// identifying that worker (ID in [0, Count)), so any per-worker state is
+// fresh and not shared. Workers that receive no events never invoke the
+// factory. With parallelism == 1 a single instance is built. If factory
+// is nil, the first Run returns ErrNilFactory.
 //
 // Cursor semantics: partial progress is allowed in the sequential path
 // (parallelism <= 1). If a Handle call fails mid-batch, the cursor
@@ -94,10 +95,11 @@ func NewPointerHandlerRelay(name string, store PointerStore, incrementIDStore In
 // incrementIDStore. The name must be unique across all relays sharing
 // the same IncrementIDStore.
 //
-// factory produces one BatchHandler instance per worker; it is invoked
-// once per worker at the start of each Run with a WorkerContext
-// identifying that worker, so any per-worker state (e.g. an AMQP channel)
-// is fresh and not shared. With parallelism == 1 a single instance is
+// factory produces one BatchHandler instance per worker; within a Run it
+// is invoked the first time a worker is handed an event, with a
+// WorkerContext identifying that worker, so any per-worker state (e.g. an
+// AMQP channel) is fresh and not shared. Workers that receive no events
+// never invoke the factory. With parallelism == 1 a single instance is
 // built. If factory is nil, the first Run returns ErrNilFactory.
 //
 // Strict all-or-nothing: the cursor is advanced only when the entire

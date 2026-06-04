@@ -20,10 +20,6 @@ type relayConfig struct {
 	parallelism           int
 }
 
-// name is the only piece of state that doesn't fit RelayOption — it
-// identifies the relay inside an IncrementIDStore. Each concrete relay
-// stores its own name; relayConfig itself stays option-only.
-
 // pickWorker hashes the event's EntityID to a stable worker index. The same
 // EntityID always lands on the same worker for a given n, so per-aggregate
 // ordering is preserved across batches.

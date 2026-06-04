@@ -12,14 +12,13 @@ import (
 )
 
 // mockBatchHandler implements BatchHandler and records per-worker
-// bookkeeping so tests can assert that stream-konsistente Verteilung und
-// Commit-Barriere korrekt funktionieren.
+// bookkeeping so tests can assert that stream-consistent distribution and
+// the commit barrier work correctly.
 type mockBatchHandler struct {
 	mu sync.Mutex
 
 	handleEvents     []StoredEvent
 	handleByEntity   map[uuid.UUID][]StoredEvent
-	handleByWorker   map[int][]StoredEvent
 	commitCalls      int
 	commitErr        error
 	handleErr        error
@@ -32,7 +31,6 @@ type mockBatchHandler struct {
 func newMockBatchHandler() *mockBatchHandler {
 	return &mockBatchHandler{
 		handleByEntity: make(map[uuid.UUID][]StoredEvent),
-		handleByWorker: make(map[int][]StoredEvent),
 	}
 }
 
@@ -44,8 +42,6 @@ func (m *mockBatchHandler) Handle(ctx context.Context, ev StoredEvent) error {
 	n := m.calls
 	m.handleEvents = append(m.handleEvents, ev)
 	m.handleByEntity[ev.EntityID] = append(m.handleByEntity[ev.EntityID], ev)
-	workerID := workerIDForEntity(ev.EntityID)
-	m.handleByWorker[workerID] = append(m.handleByWorker[workerID], ev)
 	sleep := m.handleSleep
 	err := m.handleErr
 	m.mu.Unlock()
@@ -75,12 +71,6 @@ func (m *mockBatchHandler) Commit(_ context.Context) error {
 	err := m.commitErr
 	m.mu.Unlock()
 	return err
-}
-
-// workerIDForEntity mirrors the hashing done by pickWorker so tests can
-// predict which worker index a given entity is routed to.
-func workerIDForEntity(id uuid.UUID) int {
-	return int(id[0]) % 256 // stable per test, no parallelism involved
 }
 
 // newEventsByEntities produces StoredEvents with explicit EntityID assignment

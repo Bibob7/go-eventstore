@@ -1,13 +1,13 @@
 # Go Event Store
 
-A lightweight Go library for the transactional outbox pattern. It provides the core abstractions for appending domain events and relaying them to consumers with gap-safe, cursor-based ordering.
+A lightweight Go library for the [transactional outbox pattern](https://microservices.io/patterns/data/transactional-outbox.html). It provides the core abstractions for appending domain events and relaying them to consumers with gap-safe, cursor-based ordering (a [polling publisher](https://microservices.io/patterns/data/polling-publisher.html)).
 
 ## Modules
 
 | Module | Description |
 |--------|-------------|
 | `github.com/Bibob7/go-eventstore` | Core interfaces, pointer relay, and transient relay (no DB dependency) |
-| `github.com/Bibob7/go-eventstore/integration/mysql` | MySQL implementation of `Store`, `PointerStore`, `CleanUpStore`, and `IncrementIDStore` |
+| `github.com/Bibob7/go-eventstore/integration/mysql` | MySQL implementation of `Store`, `PointerStore`, `TransientStore`, `CleanUpToStore`, and `IncrementIDStore` |
 
 ## Installation
 
@@ -121,7 +121,7 @@ A `TransientRelay` deletes each event from the store after all handlers have pro
 ```go
 relay := eventstore.NewTransientHandlerRelay(
     "order-relay",
-    bundle.EventStore, // EventStore also implements CleanUpStore
+    bundle.EventStore, // EventStore also implements TransientStore
     func(eventstore.WorkerContext) eventstore.Handler {
         return &NotifyHandler{}
     },
@@ -138,16 +138,6 @@ relay := eventstore.NewTransientHandlerRelay(
 | `WithBatchDelay(d)` | Unconditional delay between batches. |
 | `WithConditionalBatchDelay(d)` | Delay applied only when a handler returns `ErrEventNotReadyToProcess`. |
 | `WithParallelism(n)` | Run handler calls across `n` worker goroutines partitioned by `EntityID` (default `1`). See [Parallel relay](#parallel-relay-worker-pool) below. |
-
-## Key concepts
-
-**PointerStore** — fetches events since a given `IncrementID`. The MySQL implementation applies gap detection to avoid delivering events out of order while concurrent transactions are in-flight.
-
-**IncrementIDStore** — persists the last successfully processed position per relay, enabling resumption after restarts. `SetIncrementID` uses an expected previous value so implementations can enforce optimistic locking.
-
-**CleanUpStore** — used by `TransientRelay` to fetch and remove already-processed events.
-
-**ErrEventNotReadyToProcess** — handlers return this to signal a temporary condition. The relay pauses (configurable via `WithConditionalBatchDelay`) instead of treating it as a hard failure.
 
 ## Parallel relay (worker pool)
 
@@ -209,6 +199,46 @@ func (p *AMQPPublisher) Commit(ctx context.Context) error {
 `Commit(ctx)` is invoked once per worker after all of its events have been processed, before the relay advances the cursor (or, for `TransientRelay`, calls `CleanUpEvents`). This mirrors the PHP `MESSAGE_SYNC` / `MESSAGE_SYNC_ACK` barrier: per-worker work flushes atomically, then the next batch starts. If any handler returns an error, the pool cancels, no `Commit` runs, and the error propagates from `Run` so the surrounding retry loop can resume from the last committed position.
 
 Plain `Handler` relays (`NewPointerHandlerRelay` / `NewTransientHandlerRelay`) have no `Commit` barrier — reach for a `BatchHandler` relay only when you need one. With `n == 1` (the default) a `BatchHandler` relay runs sequentially and `Commit` fires once after the last event of the batch.
+
+## Glossary
+
+The types below are the building blocks of the library. For the broader patterns they implement, see the [transactional outbox](https://microservices.io/patterns/data/transactional-outbox.html) and [polling publisher](https://microservices.io/patterns/data/polling-publisher.html) patterns.
+
+### Events
+
+**DomainEvent** — the write model you implement and pass to `Store.Append`. It is a [domain event](https://martinfowler.com/eaaDev/DomainEvent.html): it exposes the event's `ID`, `AggregateID`, `EventType`, and `OccurredAt`; how the payload is serialized is up to the `Store` implementation.
+
+**StoredEvent** — the read model delivered to handlers. It carries the database-assigned `IncrementID` (the relay's cursor position), the `EntityID` (used to partition events across parallel workers), the serialized `Payload`, and the same `EventType` / `OccurredAt` metadata.
+
+### Stores
+
+**Store** — the minimal write interface: `Append(ctx, ...DomainEvent)`. Every backend implements at least this.
+
+**PointerStore** — cursor-based reads: `FetchBatchOfEventsSince(lastIncrementID, limit)` returns events ordered by ascending `IncrementID`. Backs the pointer relays. The MySQL implementation applies gap detection so events are not delivered out of order while concurrent transactions are still in flight.
+
+**TransientStore** — work-queue reads: `FetchBatchOfEvents(limit)` returns the head of the queue and `CleanUpEvents(events)` removes them after successful processing. Backs the transient relays, where each event is delivered once and then deleted.
+
+**IncrementIDStore** — persists the last successfully processed `IncrementID` per relay (keyed by relay name), enabling resumption after restarts. `SetIncrementID` takes an expected previous value so implementations can enforce [optimistic concurrency control](https://en.wikipedia.org/wiki/Optimistic_concurrency_control) (see `ErrIncrementIDConflict`).
+
+**CleanUpToStore** — bulk outbox cleanup: `CleanUpToIncluding(incrementID)` removes every event at or below a position in one call. Useful when a downstream consumer has acknowledged a cursor and everything up to it can be discarded.
+
+### Processing
+
+**Relay** — fetches the next batch from a store and dispatches it to handlers. Create one with a constructor (`NewPointerHandlerRelay`, `NewTransientBatchHandlerRelay`, …) and call `Run` in a loop. See [Run a PointerRelay](#4-run-a-pointerrelay) and [Parallel relay](#parallel-relay-worker-pool).
+
+**Handler** — processes a single `StoredEvent` via `Handle`, plus a `Name` for identification. Supplied to a relay through a factory (`func(WorkerContext) Handler`) so each worker can get its own instance.
+
+**BatchHandler** — a `Handler` with an extra `Commit(ctx)` hook that fires once per worker after all of its events in a batch are handled, giving per-batch atomicity (e.g. buffer in `Handle`, flush in `Commit`). Used with the `BatchHandler` relays.
+
+**WorkerContext** — passed to the factory to identify the worker (`ID` in `[0, Count)`, `Count` = parallelism), so factories can shard per-worker resources or tag logs/metrics.
+
+### Error signals
+
+**ErrEventNotReadyToProcess** — handlers return this to signal a temporary condition. The relay pauses (configurable via `WithConditionalBatchDelay`) instead of treating it as a hard failure.
+
+**ErrIncrementIDConflict** — returned by an `IncrementIDStore` when the stored position changed between read and write, so a concurrent relay can detect it lost the optimistic-locking race.
+
+**ErrNilFactory** — returned from `Run` when a relay was constructed with a nil handler factory.
 
 ## Examples
 
