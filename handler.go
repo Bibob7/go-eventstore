@@ -2,8 +2,11 @@ package eventstore
 
 import "context"
 
-// Handler processes a single StoredEvent. Register one or more handlers on a
-// Relay via RegisterHandler. All handlers are called for every event in order.
+// Handler processes a single StoredEvent. A plain-Handler relay
+// (NewPointerHandlerRelay / NewTransientHandlerRelay) is created with a
+// single factory that produces one Handler per worker; the handler is
+// called for every event on the worker that the event's EntityID hashes
+// to.
 type Handler interface {
 	// Handle processes of the given event. Return ErrEventNotReadyToProcess to
 	// signal a temporary condition; return any other error to abort the batch.

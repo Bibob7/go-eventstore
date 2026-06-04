@@ -43,6 +43,126 @@ jobs:
       - name: Test core module
         run: go test ./...
 
+  benchmarks:
+    name: Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Run benchmarks (core module)
+        # -run=^$ skips the unit tests (covered by the Unit Tests job);
+        # -benchtime=1x runs each benchmark once so this stays a fast
+        # smoke check that they compile and execute without failing.
+        run: go test -run=^$ -bench=. -benchmem -benchtime=1x ./...
+
+  benchmark-compare:
+    name: Benchmark Regression
+    runs-on: ubuntu-latest
+    # Only meaningful on PRs: compares the PR head against its base branch
+    # on the same runner so the numbers are directly comparable.
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      # Tunables. BENCH_COUNT must be >= 6 for benchstat to compute a
+      # confidence interval. BENCH_PKG limits the run to the package that
+      # actually holds benchmarks (keeps the job to a few minutes).
+      BENCH_COUNT: "6"
+      BENCH_TIME: "1s"
+      BENCH_PKG: "."
+      # Fail the job when a benchmark is statistically significantly slower
+      # (benchstat p < 0.05) than base by more than this percent (time/op).
+      REGRESSION_PCT: "15"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install benchstat
+        run: go install golang.org/x/perf/cmd/benchstat@latest
+
+      - name: Benchmark PR head
+        run: |
+          go test -run=^$ -bench=. -benchmem \
+            -benchtime="${BENCH_TIME}" -count="${BENCH_COUNT}" "${BENCH_PKG}" \
+            | tee head.txt
+
+      - name: Benchmark base (${{ github.event.pull_request.base.ref }})
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git checkout --quiet --detach "${BASE_SHA}"
+          go test -run=^$ -bench=. -benchmem \
+            -benchtime="${BENCH_TIME}" -count="${BENCH_COUNT}" "${BENCH_PKG}" \
+            | tee base.txt
+          git checkout --quiet --force -
+
+      - name: Compare with benchstat
+        run: |
+          benchstat base.txt head.txt | tee comparison.txt
+          benchstat -format csv base.txt head.txt > comparison.csv 2>/dev/null || true
+
+      - name: Post comparison as PR comment
+        # Fork PRs get a read-only token and cannot comment; the regression
+        # gate below still runs and surfaces failures as a red check.
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- benchstat-report -->';
+            const base = context.payload.pull_request.base.ref;
+            const body = marker + '\n' +
+              '## 📊 Benchmark vs `' + base + '`\n\n' +
+              '<sub>n=' + process.env.BENCH_COUNT + ', benchtime=' + process.env.BENCH_TIME +
+              ' — shared CI runner, treat absolute numbers as noisy. A row shows a' +
+              ' percentage only when the change is statistically significant' +
+              ' (p &lt; 0.05).</sub>\n\n' +
+              '```\n' + fs.readFileSync('comparison.txt', 'utf8').trim() + '\n```';
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      - name: Gate on time/op regressions
+        run: |
+          awk -F, -v thresh="${REGRESSION_PCT}" '
+            # Only inspect the sec/op table; B/op and allocs/op are reported
+            # in the PR comment but not gated here.
+            $2 == "sec/op" { insec = 1; next }
+            insec && NF < 2 { insec = 0 }
+            insec && $1 != "geomean" && $6 ~ /^\+[0-9]/ {
+              pct = $6; gsub(/[+%]/, "", pct);
+              if (pct + 0 > thresh + 0) {
+                printf "  %-55s %s slower\n", $1, $6;
+                bad = 1;
+              }
+            }
+            END {
+              if (bad) {
+                print "::error::Benchmark time/op regression(s) exceed " thresh "% (vs base, p < 0.05)";
+                exit 1;
+              }
+              print "No significant time/op regression beyond " thresh "%.";
+            }
+          ' comparison.csv
+
   integration-tests:
     name: Integration Tests (MySQL)
     runs-on: ubuntu-latest

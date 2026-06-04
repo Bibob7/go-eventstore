@@ -12,8 +12,8 @@ type Store interface {
 
 // TransientStore provides head-of-queue access to events that are removed
 // after successful processing. It is intended for work-queue style relays
-// (see NewTransientRelay) where each event is delivered exactly once and
-// then deleted from the store.
+// (see NewTransientHandlerRelay / NewTransientBatchHandlerRelay) where
+// each event is delivered exactly once and then deleted from the store.
 type TransientStore interface {
 	// FetchBatchOfEvents returns up to limit events starting from the smallest IncrementID.
 	FetchBatchOfEvents(ctx context.Context, limit int) ([]StoredEvent, error)

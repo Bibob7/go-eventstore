@@ -22,7 +22,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 
-	eventstore "github.com/Bibob7/go-eventstore"
+	"github.com/Bibob7/go-eventstore"
 	mysqlstore "github.com/Bibob7/go-eventstore/integration/mysql"
 
 	"github.com/Bibob7/go-eventstore/integration/mysql/example/shared"
@@ -74,21 +74,25 @@ func run() error {
 	// --- Step 2: Two independent consumers, each with their own cursor ---
 	fmt.Println("\n=== Step 2: Running two PointerRelays concurrently ===")
 
-	analyticsRelay := eventstore.NewPointerRelay(
+	analyticsRelay := eventstore.NewPointerHandlerRelay(
 		"analytics-consumer",
 		bundle.EventStore,
 		bundle.IncrementIDStore,
+		func(eventstore.WorkerContext) eventstore.Handler {
+			return &loggingHandler{name: "analytics"}
+		},
 		eventstore.WithBatchSize(10),
 	)
-	analyticsRelay.RegisterHandler(&loggingHandler{name: "analytics"})
 
-	notificationRelay := eventstore.NewPointerRelay(
+	notificationRelay := eventstore.NewPointerHandlerRelay(
 		"notification-consumer",
 		bundle.EventStore,
 		bundle.IncrementIDStore,
+		func(eventstore.WorkerContext) eventstore.Handler {
+			return &loggingHandler{name: "notifications"}
+		},
 		eventstore.WithBatchSize(10),
 	)
-	notificationRelay.RegisterHandler(&loggingHandler{name: "notifications"})
 
 	if err := runConcurrent(ctx, analyticsRelay, notificationRelay); err != nil {
 		return err

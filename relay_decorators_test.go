@@ -16,7 +16,7 @@ func TestDelayedRelay_Name(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			r := newDelayedRelay(&delayedRelayStub{name: tc.relayName}, 10*time.Millisecond)
+			r := newDelayedRelay(&relayStub{name: tc.relayName}, 10*time.Millisecond)
 			if r.Name() != tc.relayName {
 				t.Fatalf("expected %q, got %q", tc.relayName, r.Name())
 			}
@@ -62,7 +62,7 @@ func TestDelayedRelay_Run(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			r := newDelayedRelay(&delayedRelayStub{name: "r", processErr: tc.processErr}, delay)
+			r := newDelayedRelay(&relayStub{name: "r", processErr: tc.processErr}, delay)
 
 			ctx := context.Background()
 			if tc.cancelAfter > 0 {
@@ -103,7 +103,7 @@ func TestBatchDelayedRelay_Name(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			r := newBatchDelayedRelay(&delayedRelayStub{name: tc.relayName}, 10*time.Millisecond)
+			r := newBatchDelayedRelay(&relayStub{name: tc.relayName}, 10*time.Millisecond)
 			if r.Name() != tc.relayName {
 				t.Fatalf("expected %q, got %q", tc.relayName, r.Name())
 			}
@@ -140,7 +140,7 @@ func TestBatchDelayedRelay_Run(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			r := newBatchDelayedRelay(&delayedRelayStub{name: "r", processErr: tc.processErr}, delay)
+			r := newBatchDelayedRelay(&relayStub{name: "r", processErr: tc.processErr}, delay)
 
 			ctx := context.Background()
 			if tc.cancelAfter > 0 {

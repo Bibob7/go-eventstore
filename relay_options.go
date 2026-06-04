@@ -2,16 +2,6 @@ package eventstore
 
 import "time"
 
-// relayConfig holds all options collected during NewPointerRelay construction.
-// It is separate from pointerRelay so that decorator-specific settings are not
-// stored on the relay itself.
-type relayConfig struct {
-	batchSize             int
-	handleDelay           time.Duration
-	batchDelay            time.Duration
-	conditionalBatchDelay time.Duration
-}
-
 // RelayOption is a functional option for configuring a PointerRelay.
 type RelayOption func(*relayConfig)
 
@@ -20,14 +10,6 @@ type RelayOption func(*relayConfig)
 func WithBatchSize(batchSize int) RelayOption {
 	return func(c *relayConfig) {
 		c.batchSize = batchSize
-	}
-}
-
-// WithHandleDelay inserts a pause between processing individual events within a batch.
-// Useful for rate-limiting or giving downstream systems time to react.
-func WithHandleDelay(delay time.Duration) RelayOption {
-	return func(c *relayConfig) {
-		c.handleDelay = delay
 	}
 }
 
@@ -44,5 +26,25 @@ func WithBatchDelay(d time.Duration) RelayOption {
 func WithConditionalBatchDelay(d time.Duration) RelayOption {
 	return func(c *relayConfig) {
 		c.conditionalBatchDelay = d
+	}
+}
+
+// WithParallelism runs the relay across n worker goroutines partitioned by
+// the event's EntityID (fnv32a(EntityID) % n). All events of a given
+// aggregate are processed sequentially on the same worker, preserving
+// stream ordering. n must be >= 1; values < 1 are clamped to 1.
+//
+// On a BatchHandler relay, the factory produces one BatchHandler per
+// worker and Commit fires once per worker per batch. On a plain-Handler
+// relay, the factory produces one Handler per worker; the relay is strict
+// all-or-nothing in the parallel path regardless of strategy (the
+// per-EntityID partitioning makes partial per-worker progress unsafe
+// to merge into a single cursor update).
+func WithParallelism(n int) RelayOption {
+	return func(c *relayConfig) {
+		if n < 1 {
+			n = 1
+		}
+		c.parallelism = n
 	}
 }

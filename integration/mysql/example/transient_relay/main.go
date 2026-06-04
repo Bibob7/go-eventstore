@@ -75,12 +75,14 @@ func run() error {
 	// --- Step 2: TransientRelay processes and removes events one by one ---
 	fmt.Println("\n=== Step 2: TransientRelay processes outbox ===")
 
-	relay := eventstore.NewTransientRelay(
+	relay := eventstore.NewTransientHandlerRelay(
 		"transient-relay",
 		bundle.EventStore,
+		func(eventstore.WorkerContext) eventstore.Handler {
+			return &printHandler{}
+		},
 		eventstore.WithBatchSize(10),
 	)
-	relay.RegisterHandler(&printHandler{})
 
 	if err := relay.Run(ctx); err != nil {
 		return fmt.Errorf("relay run: %w", err)
