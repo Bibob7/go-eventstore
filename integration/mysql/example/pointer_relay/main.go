@@ -22,7 +22,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 
-	eventstore "github.com/Bibob7/go-eventstore"
+	"github.com/Bibob7/go-eventstore"
 	mysqlstore "github.com/Bibob7/go-eventstore/integration/mysql"
 
 	"github.com/Bibob7/go-eventstore/integration/mysql/example/shared"
