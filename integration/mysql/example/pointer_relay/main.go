@@ -1,6 +1,6 @@
 // pointer_relay demonstrates the PointerRelay, which tracks the last processed
 // event position (IncrementID) so it can resume after a restart without
-// reprocessing events. Multiple independent relays (consumers) can subscribe
+// reprocessing events. Multiple independent relays can subscribe
 // to the same outbox with their own cursors.
 //
 // Run with:
@@ -71,11 +71,11 @@ func run() error {
 		fmt.Printf("  appended %s (%s)\n", e.ID(), e.CustomerID)
 	}
 
-	// --- Step 2: Two independent consumers, each with their own cursor ---
+	// --- Step 2: Two independent relays, each with their own cursor ---
 	fmt.Println("\n=== Step 2: Running two PointerRelays concurrently ===")
 
 	analyticsRelay := eventstore.NewPointerHandlerRelay(
-		"analytics-consumer",
+		"analytics-relay",
 		bundle.EventStore,
 		bundle.IncrementIDStore,
 		func(eventstore.WorkerContext) eventstore.Handler {
@@ -85,7 +85,7 @@ func run() error {
 	)
 
 	notificationRelay := eventstore.NewPointerHandlerRelay(
-		"notification-consumer",
+		"notification-relay",
 		bundle.EventStore,
 		bundle.IncrementIDStore,
 		func(eventstore.WorkerContext) eventstore.Handler {

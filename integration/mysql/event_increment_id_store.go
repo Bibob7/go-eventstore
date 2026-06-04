@@ -25,20 +25,20 @@ func NewEventIncrementIDStore(db *sql.DB, tableName string) *EventIncrementIDSto
 	}
 }
 
-func (s *EventIncrementIDStore) SetIncrementID(ctx context.Context, consumerName string, expectedPreviousID int64, incrementID int64) error {
+func (s *EventIncrementIDStore) SetIncrementID(ctx context.Context, relayName string, expectedPreviousID int64, incrementID int64) error {
 	return WithTransaction(ctx, s.db, func(tx *sql.Tx) error {
 		// #nosec G201
-		selectStmt := fmt.Sprintf("SELECT increment_id FROM %s WHERE consumer_name = ? FOR UPDATE", s.tableName)
+		selectStmt := fmt.Sprintf("SELECT increment_id FROM %s WHERE relay_name = ? FOR UPDATE", s.tableName)
 		var currentID int64
-		err := tx.QueryRowContext(ctx, selectStmt, consumerName).Scan(&currentID)
+		err := tx.QueryRowContext(ctx, selectStmt, relayName).Scan(&currentID)
 
 		if errors.Is(err, sql.ErrNoRows) {
 			if expectedPreviousID != 0 {
 				return eventstore.ErrIncrementIDConflict
 			}
 			// #nosec G201
-			insertStmt := fmt.Sprintf("INSERT INTO %s (consumer_name, increment_id) VALUES (?, ?)", s.tableName)
-			if _, err = tx.ExecContext(ctx, insertStmt, consumerName, incrementID); err != nil {
+			insertStmt := fmt.Sprintf("INSERT INTO %s (relay_name, increment_id) VALUES (?, ?)", s.tableName)
+			if _, err = tx.ExecContext(ctx, insertStmt, relayName, incrementID); err != nil {
 				return err
 			}
 			return nil
@@ -53,8 +53,8 @@ func (s *EventIncrementIDStore) SetIncrementID(ctx context.Context, consumerName
 
 		if currentID != incrementID {
 			// #nosec G201
-			updateStmt := fmt.Sprintf("UPDATE %s SET increment_id = ? WHERE consumer_name = ?", s.tableName)
-			if _, err = tx.ExecContext(ctx, updateStmt, incrementID, consumerName); err != nil {
+			updateStmt := fmt.Sprintf("UPDATE %s SET increment_id = ? WHERE relay_name = ?", s.tableName)
+			if _, err = tx.ExecContext(ctx, updateStmt, incrementID, relayName); err != nil {
 				return err
 			}
 		}
@@ -62,11 +62,11 @@ func (s *EventIncrementIDStore) SetIncrementID(ctx context.Context, consumerName
 	}, nil)
 }
 
-func (s *EventIncrementIDStore) GetIncrementID(ctx context.Context, consumerName string) (int64, error) {
+func (s *EventIncrementIDStore) GetIncrementID(ctx context.Context, relayName string) (int64, error) {
 	// #nosec G201
-	stmt := fmt.Sprintf("SELECT increment_id FROM %s WHERE consumer_name = ?", s.tableName)
+	stmt := fmt.Sprintf("SELECT increment_id FROM %s WHERE relay_name = ?", s.tableName)
 	var incrementID int64
-	err := s.db.QueryRowContext(ctx, stmt, consumerName).Scan(&incrementID)
+	err := s.db.QueryRowContext(ctx, stmt, relayName).Scan(&incrementID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}

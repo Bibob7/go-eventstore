@@ -1,6 +1,6 @@
 # Go Event Store
 
-A lightweight Go library for the [transactional outbox pattern](https://microservices.io/patterns/data/transactional-outbox.html). It provides the core abstractions for appending domain events and relaying them to consumers with gap-safe, cursor-based ordering (a [polling publisher](https://microservices.io/patterns/data/polling-publisher.html)).
+A lightweight Go library for the [transactional outbox pattern](https://microservices.io/patterns/data/transactional-outbox.html). It provides the core abstractions for appending domain events and relaying them to handlers with gap-safe, cursor-based ordering (a [polling publisher](https://microservices.io/patterns/data/polling-publisher.html)).
 
 ## Modules
 
@@ -76,7 +76,7 @@ func (h *NotifyHandler) Handle(ctx context.Context, event eventstore.StoredEvent
 
 ### 4. Run a PointerRelay
 
-A `PointerRelay` tracks the last successfully processed `IncrementID` per consumer so it can resume after a restart without reprocessing events.
+A `PointerRelay` tracks the last successfully processed `IncrementID` per relay so it can resume after a restart without reprocessing events.
 
 ```go
 bundle := mysqlstore.NewEventStoreBundle(db, mysqlstore.Config{
@@ -140,7 +140,7 @@ relay := eventstore.NewTransientHandlerRelay(
 
 ## Parallel relay (worker pool)
 
-For high-throughput outbox consumers, `WithParallelism(n)` shards each batch across `n` worker goroutines. Events are routed to workers by hashing the event's `EntityID` with `fnv32a`, so all events of a given aggregate are processed sequentially on the same worker — preserving per-stream ordering while running different aggregates in parallel.
+For high-throughput outbox relays, `WithParallelism(n)` shards each batch across `n` worker goroutines. Events are routed to workers by hashing the event's `EntityID` with `fnv32a`, so all events of a given aggregate are processed sequentially on the same worker — preserving per-stream ordering while running different aggregates in parallel.
 
 ### Per-worker state: the factory
 
@@ -217,7 +217,7 @@ The types below are the building blocks of the library. For the broader patterns
 
 **IncrementIDStore** — persists the last successfully processed `IncrementID` per relay (keyed by relay name), enabling resumption after restarts. `SetIncrementID` takes an expected previous value so implementations can enforce [optimistic concurrency control](https://en.wikipedia.org/wiki/Optimistic_concurrency_control) (see `ErrIncrementIDConflict`).
 
-**CleanUpToStore** — bulk outbox cleanup: `CleanUpToIncluding(incrementID)` removes every event at or below a position in one call. Useful when a downstream consumer has acknowledged a cursor and everything up to it can be discarded.
+**CleanUpToStore** — bulk outbox cleanup: `CleanUpToIncluding(incrementID)` removes every event at or below a position in one call. Useful when a relay has acknowledged a cursor and everything up to it can be discarded.
 
 ### Processing
 

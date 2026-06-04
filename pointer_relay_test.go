@@ -35,7 +35,7 @@ type mockIncrementIDStore struct {
 	incrementIDs map[string]int64
 	getErr       error
 	setErr       error
-	setHook      func(consumerName string)
+	setHook      func(relayName string)
 }
 
 func newMockIncrementIDStore() *mockIncrementIDStore {
@@ -44,24 +44,24 @@ func newMockIncrementIDStore() *mockIncrementIDStore {
 	}
 }
 
-func (m *mockIncrementIDStore) GetIncrementID(ctx context.Context, consumerName string) (int64, error) {
+func (m *mockIncrementIDStore) GetIncrementID(ctx context.Context, relayName string) (int64, error) {
 	if m.getErr != nil {
 		return 0, m.getErr
 	}
-	return m.incrementIDs[consumerName], nil
+	return m.incrementIDs[relayName], nil
 }
 
-func (m *mockIncrementIDStore) SetIncrementID(ctx context.Context, consumerName string, expectedPreviousID int64, incrementID int64) error {
+func (m *mockIncrementIDStore) SetIncrementID(ctx context.Context, relayName string, expectedPreviousID int64, incrementID int64) error {
 	if m.setErr != nil {
 		return m.setErr
 	}
 	if m.setHook != nil {
-		m.setHook(consumerName)
+		m.setHook(relayName)
 	}
-	if m.incrementIDs[consumerName] != expectedPreviousID {
+	if m.incrementIDs[relayName] != expectedPreviousID {
 		return ErrIncrementIDConflict
 	}
-	m.incrementIDs[consumerName] = incrementID
+	m.incrementIDs[relayName] = incrementID
 	return nil
 }
 
@@ -106,7 +106,7 @@ func TestPointerRelay_Name(t *testing.T) {
 		name      string
 		relayName string
 	}{
-		{name: "returns configured name", relayName: "test-processor"},
+		{name: "returns configured name", relayName: "test-relay"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -231,7 +231,7 @@ func TestPointerRelay_Run(t *testing.T) {
 			inc.getErr = tc.getErr
 			inc.setErr = tc.setErr
 			h := &mockHandler{err: tc.handlerErr, failOnCall: tc.failOnNthHandle}
-			relay := NewPointerHandlerRelay("test-processor", store, inc, func(WorkerContext) Handler { return h }, tc.opts...)
+			relay := NewPointerHandlerRelay("test-relay", store, inc, func(WorkerContext) Handler { return h }, tc.opts...)
 
 			err := relay.Run(context.Background())
 
@@ -241,7 +241,7 @@ func TestPointerRelay_Run(t *testing.T) {
 			if len(h.handleEvents) != tc.wantHandled {
 				t.Errorf("expected %d handled events, got %d", tc.wantHandled, len(h.handleEvents))
 			}
-			lastID, _ := inc.GetIncrementID(context.Background(), "test-processor")
+			lastID, _ := inc.GetIncrementID(context.Background(), "test-relay")
 			if lastID != tc.wantLastID {
 				t.Errorf("expected last increment ID %d, got %d", tc.wantLastID, lastID)
 			}
@@ -252,11 +252,11 @@ func TestPointerRelay_Run(t *testing.T) {
 func TestPointerRelay_IncrementIDConflictPropagates(t *testing.T) {
 	store := &mockPointerStore{events: newEvents(1)}
 	inc := newMockIncrementIDStore()
-	inc.setHook = func(consumerName string) {
-		inc.incrementIDs[consumerName] = 99
+	inc.setHook = func(relayName string) {
+		inc.incrementIDs[relayName] = 99
 	}
 	h := &mockHandler{}
-	relay := NewPointerHandlerRelay("test-processor", store, inc, func(WorkerContext) Handler { return h })
+	relay := NewPointerHandlerRelay("test-relay", store, inc, func(WorkerContext) Handler { return h })
 
 	err := relay.Run(context.Background())
 	if err == nil || !errors.Is(err, ErrIncrementIDConflict) {
@@ -290,7 +290,7 @@ func TestPointerRelay_BatchDelayOptions(t *testing.T) {
 			store := &mockPointerStore{events: newEvents(1)}
 			inc := newMockIncrementIDStore()
 			h := &mockHandler{err: tc.handlerErr}
-			relay := NewPointerHandlerRelay("test-processor", store, inc, func(WorkerContext) Handler { return h }, tc.opts...)
+			relay := NewPointerHandlerRelay("test-relay", store, inc, func(WorkerContext) Handler { return h }, tc.opts...)
 
 			start := time.Now()
 			_ = relay.Run(context.Background())

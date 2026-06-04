@@ -21,9 +21,9 @@ func ensureIncrementIDTable(t *testing.T, db *sql.DB) {
 	defer cancel()
 
 	stmt := `CREATE TABLE IF NOT EXISTS event_increment_id (
-        consumer_name VARCHAR(255) NOT NULL,
+        relay_name VARCHAR(255) NOT NULL,
         increment_id BIGINT NOT NULL DEFAULT 0,
-        PRIMARY KEY (consumer_name)
+        PRIMARY KEY (relay_name)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;`
 
 	_, err := db.ExecContext(ctx, stmt)
@@ -58,7 +58,7 @@ func TestEventIncrementIDStore_SetIncrementID(t *testing.T) {
 
 	tests := []struct {
 		name               string
-		consumerName       string
+		relayName          string
 		seed               []seedStep
 		expectedPreviousID int64
 		incrementID        int64
@@ -67,14 +67,14 @@ func TestEventIncrementIDStore_SetIncrementID(t *testing.T) {
 	}{
 		{
 			name:               "first insert with expectedPreviousID=0",
-			consumerName:       "relay-a",
+			relayName:          "relay-a",
 			expectedPreviousID: 0,
 			incrementID:        10,
 			wantStoredID:       10,
 		},
 		{
 			name:               "update with correct expectedPreviousID",
-			consumerName:       "relay-a",
+			relayName:          "relay-a",
 			seed:               []seedStep{{0, 10}},
 			expectedPreviousID: 10,
 			incrementID:        11,
@@ -82,7 +82,7 @@ func TestEventIncrementIDStore_SetIncrementID(t *testing.T) {
 		},
 		{
 			name:               "conflict on wrong expectedPreviousID",
-			consumerName:       "relay-a",
+			relayName:          "relay-a",
 			seed:               []seedStep{{0, 10}, {10, 11}},
 			expectedPreviousID: 9,
 			incrementID:        12,
@@ -91,7 +91,7 @@ func TestEventIncrementIDStore_SetIncrementID(t *testing.T) {
 		},
 		{
 			name:               "idempotent no-op when expectedPreviousID equals incrementID",
-			consumerName:       "relay-a",
+			relayName:          "relay-a",
 			seed:               []seedStep{{0, 10}, {10, 11}},
 			expectedPreviousID: 11,
 			incrementID:        11,
@@ -99,7 +99,7 @@ func TestEventIncrementIDStore_SetIncrementID(t *testing.T) {
 		},
 		{
 			name:               "conflict when row missing but expectedPreviousID non-zero",
-			consumerName:       "relay-missing",
+			relayName:          "relay-missing",
 			expectedPreviousID: 10,
 			incrementID:        11,
 			wantErr:            eventstore.ErrIncrementIDConflict,
@@ -112,10 +112,10 @@ func TestEventIncrementIDStore_SetIncrementID(t *testing.T) {
 			ensureIncrementIDTable(t, db)
 
 			for _, s := range tt.seed {
-				require.NoError(t, store.SetIncrementID(context.Background(), tt.consumerName, s.expectedPreviousID, s.incrementID))
+				require.NoError(t, store.SetIncrementID(context.Background(), tt.relayName, s.expectedPreviousID, s.incrementID))
 			}
 
-			err := store.SetIncrementID(context.Background(), tt.consumerName, tt.expectedPreviousID, tt.incrementID)
+			err := store.SetIncrementID(context.Background(), tt.relayName, tt.expectedPreviousID, tt.incrementID)
 
 			if tt.wantErr != nil {
 				require.Error(t, err)
@@ -124,7 +124,7 @@ func TestEventIncrementIDStore_SetIncrementID(t *testing.T) {
 				require.NoError(t, err)
 			}
 
-			incrementID, getErr := store.GetIncrementID(context.Background(), tt.consumerName)
+			incrementID, getErr := store.GetIncrementID(context.Background(), tt.relayName)
 			require.NoError(t, getErr)
 			require.Equal(t, tt.wantStoredID, incrementID)
 		})

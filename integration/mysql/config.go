@@ -6,6 +6,6 @@ package mysql
 type Config struct {
 	// OutboxTableName is the name of the table used to store domain events.
 	OutboxTableName string `mapstructure:"outboxTableName"`
-	// IncrementIDTableName is the name of the table used to persist relay consumer positions.
+	// IncrementIDTableName is the name of the table used to persist relay positions.
 	IncrementIDTableName string `mapstructure:"incrementIDTableName"`
 }

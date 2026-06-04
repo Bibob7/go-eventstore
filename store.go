@@ -23,7 +23,7 @@ type TransientStore interface {
 
 // PointerStore provides cursor-based event fetching.
 // Implementations track a position (IncrementID) and return events after it,
-// enabling relay consumers to process events exactly once.
+// enabling relays to process events exactly once.
 type PointerStore interface {
 	// FetchBatchOfEventsSince returns up to limit events with IncrementID greater
 	// than lastIncrementID, ordered by IncrementID ascending.
@@ -32,7 +32,7 @@ type PointerStore interface {
 
 // CleanUpToStore removes all events with IncrementID <= a given threshold
 // in a single call. It is intended for outbox cleanup patterns where, once
-// a downstream consumer has acknowledged a position, every event at or
+// a relay has acknowledged a position, every event at or
 // before that position can be discarded.
 type CleanUpToStore interface {
 	// CleanUpToIncluding removes all events whose IncrementID is less than
