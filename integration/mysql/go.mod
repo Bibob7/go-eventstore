@@ -15,3 +15,9 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+// Use the local source tree so integration tests exercise the same code
+// that gets shipped. CI runs from the repo root, so the relative path is
+// stable. `go mod tidy` will keep the require line above for the module
+// graph, but resolution always prefers the replace.
+replace github.com/Bibob7/go-eventstore => ../..

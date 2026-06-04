@@ -409,7 +409,6 @@ func TestTransientRelay_WithParallelism_4_CleansUpBatch(t *testing.T) {
 // familiar.
 type mockBatchHandlerAdapter struct {
 	mu          sync.Mutex
-	inner       mockHandler
 	errOnCall   int
 	err         error
 	calls       int
@@ -442,22 +441,17 @@ func (m *mockBatchHandlerAdapter) Commit(_ context.Context) error {
 // counterHandler is a stateful Handler used to verify that each worker
 // gets its own instance when registered via RegisterHandlerFactory.
 type counterHandler struct {
-	id    int
-	mu    sync.Mutex
-	seen  []uuid.UUID
-	other *counterHandler
+	id   int
+	mu   sync.Mutex
+	seen []uuid.UUID
 }
 
 func (c *counterHandler) Name() string { return "counter" }
 
-func (c *counterHandler) Handle(ctx context.Context, ev StoredEvent) error {
+func (c *counterHandler) Handle(_ context.Context, ev StoredEvent) error {
 	c.mu.Lock()
 	c.seen = append(c.seen, ev.EntityID)
-	other := c.other
 	c.mu.Unlock()
-	if other != nil {
-		_ = other
-	}
 	return nil
 }
 

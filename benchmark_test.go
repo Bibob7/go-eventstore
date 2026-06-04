@@ -420,22 +420,20 @@ func BenchmarkPointerRelay_Idle(b *testing.B) {
 
 // ---- Helpers -------------------------------------------------------------
 
-// drainPointerRelay runs the relay until FetchBatchOfEventsSince returns an
-// empty slice. The "run until drained" loop is intentionally outside the
-// benchmarked code; the inner Run call is what we actually want to measure.
+// drainPointerRelay runs the relay once with a non-empty store, then once
+// more so the second call observes an empty FetchBatchOfEventsSince result
+// and returns nil. That mirrors the contract that a no-op Run returns nil
+// when no events are available, and matches what the benchmark loop needs:
+// one batch of work followed by a no-op confirmation.
+//
+// TODO: the relay this drains is constructed without registered handlers in
+// BenchmarkParallelPointerRelay, so the second call returns nil for the
+// wrong reason. Wiring up a handler factory and replacing this with a
+// proper "loop until empty" helper is tracked separately.
 func drainPointerRelay(relay Relay, _ *benchHandler) error {
 	ctx := context.Background()
-	for {
-		if err := relay.Run(ctx); err != nil {
-			return err
-		}
-		// Ask the underlying store directly: did the cursor catch up?
-		// We rely on the well-known contract that a no-op Run returns nil
-		// when no events are available, so a single extra Run is enough to
-		// detect "all caught up" without coupling to the private store type.
-		if err := relay.Run(ctx); err != nil {
-			return err
-		}
-		return nil
+	if err := relay.Run(ctx); err != nil {
+		return err
 	}
+	return relay.Run(ctx)
 }

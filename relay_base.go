@@ -2,8 +2,6 @@ package eventstore
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"hash/fnv"
 	"log/slog"
 	"sync"
@@ -46,19 +44,6 @@ func (b *relayBase) batchHandlerFactorySnapshot() []func(WorkerContext) BatchHan
 	snapshot := make([]func(WorkerContext) BatchHandler, len(b.batchHandlerFactories))
 	copy(snapshot, b.batchHandlerFactories)
 	return snapshot
-}
-
-func (b *relayBase) handleEvent(ctx context.Context, event StoredEvent, h Handler) error {
-	handlerName := fmt.Sprintf("%s_%s", b.name, h.Name())
-	if err := h.Handle(ctx, event); err != nil {
-		if errors.Is(err, ErrEventNotReadyToProcess) {
-			slog.Info("Event not ready to process, stopping", "handler_name", handlerName, "event_id", event.ID, "error", err)
-			return err
-		}
-		slog.Error("Error relaying event", "handler_name", handlerName, "event_id", event.ID, "error", err)
-		return err
-	}
-	return nil
 }
 
 func (b *relayBase) waitHandleDelay(ctx context.Context) error {
