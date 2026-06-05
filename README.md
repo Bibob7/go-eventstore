@@ -44,7 +44,7 @@ Apply the DDL from [`integration/mysql/sql/mysql/schema.sql`](integration/mysql/
 
 ```go
 cfg := mysqlstore.Config{
-    OutboxTableName:      "outbox",
+    EventStoreTableName:  "outbox",
     IncrementIDTableName: "event_increment_id",
 }
 ```
@@ -99,7 +99,7 @@ A `PointerRelay` tracks the last successfully processed `IncrementID` per relay 
 
 ```go
 bundle := mysqlstore.NewEventStoreBundle(db, mysqlstore.Config{
-    OutboxTableName:      "outbox",
+    EventStoreTableName:  "outbox",
     IncrementIDTableName: "event_increment_id",
 })
 

@@ -13,7 +13,7 @@ type EventStoreBundle struct {
 // NewEventStoreBundle initializes a new EventStoreBundle with the given database connection and configuration.
 func NewEventStoreBundle(db *sql.DB, cfg Config) *EventStoreBundle {
 	return &EventStoreBundle{
-		EventStore:       NewEventStore(db, cfg.OutboxTableName),
+		EventStore:       NewEventStore(db, cfg.EventStoreTableName),
 		IncrementIDStore: NewEventIncrementIDStore(db, cfg.IncrementIDTableName),
 	}
 }

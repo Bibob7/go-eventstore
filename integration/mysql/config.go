@@ -4,8 +4,8 @@ package mysql
 // All table names are required and must match the schema created
 // from the DDL scripts in sql/mysql/schema.sql.
 type Config struct {
-	// OutboxTableName is the name of the table used to store domain events.
-	OutboxTableName string `mapstructure:"outboxTableName"`
+	// EventStoreTableName is the name of the table used to store domain events.
+	EventStoreTableName string `mapstructure:"eventStoreTableName"`
 	// IncrementIDTableName is the name of the table used to persist relay positions.
 	IncrementIDTableName string `mapstructure:"incrementIDTableName"`
 }
