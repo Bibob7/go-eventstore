@@ -4,7 +4,7 @@ A lightweight Go library for storing domain events in an append-only log and
 processing them reliably. Events are appended with a monotonic position
 (`IncrementID`) and consumed by **relays** that dispatch them to your handlers
 with gap-safe, cursor-based ordering. Each relay tracks its own position, so
-multiple independent consumers can read the same events without coordinating.
+multiple independent relays can read the same events without coordinating.
 
 It is a small building block, not a full event-sourcing framework: it gives you
 a durable event log and reliable, ordered delivery to handlers — you decide what
@@ -12,7 +12,7 @@ to do with the events. That makes it a foundation for several patterns:
 
 - **Event-driven processing & read models** — point several `PointerRelay`s at
   the same log, each with its own cursor, to build projections or trigger side
-  effects. Events are retained, so consumers can be added or replayed later.
+  effects. Events are retained, so relays can be added or replayed later.
 - **Transactional outbox** — append events in the same transaction as your
   business data, then relay them to a message broker (a
   [polling publisher](https://microservices.io/patterns/data/polling-publisher.html)

@@ -1,5 +1,5 @@
 -- Outbox table: stores domain events before they are relayed to handlers.
--- The table name is configurable via Config.OutboxTableName.
+-- The table name is configurable via Config.EventStoreTableName.
 CREATE TABLE IF NOT EXISTS outbox (
     id            INT            NOT NULL AUTO_INCREMENT,
     event_id      BINARY(16)     NOT NULL,

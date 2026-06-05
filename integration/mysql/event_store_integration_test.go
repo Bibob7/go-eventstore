@@ -95,13 +95,13 @@ func insertEvent(t *testing.T, exec interface {
 }, id int64, eventType string) {
 	t.Helper()
 	evtID, _ := uuid.NewV4()
-	aggID, _ := uuid.NewV4()
+	streamID, _ := uuid.NewV4()
 	payload := "{}"
 	occurredAt := time.Now().Format(time.DateTime)
 
 	// Explicitly set id to craft gaps
 	stmt := fmt.Sprintf("INSERT INTO %s (id, event_id, stream_id, event_type, payload, occurred_at) VALUES (?, ?, ?, ?, ?, ?)", outboxTable)
-	_, err := exec.ExecContext(context.Background(), stmt, id, mustBinary(evtID), mustBinary(aggID), eventType, payload, occurredAt)
+	_, err := exec.ExecContext(context.Background(), stmt, id, mustBinary(evtID), mustBinary(streamID), eventType, payload, occurredAt)
 	require.NoError(t, err)
 }
 
