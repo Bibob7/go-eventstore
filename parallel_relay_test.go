@@ -1010,3 +1010,38 @@ func TestRunParallel_CancelledContextDiscardsBatch(t *testing.T) {
 		})
 	}
 }
+
+// TestRunParallel_EmptyBatch is a regression test: runParallel must not index
+// batch[len(batch)-1] on an empty batch. A transient relay with parallelism > 1
+// calls runParallel without guarding against an empty fetch, so a panic here
+// would crash the relay run.
+func TestRunParallel_EmptyBatch(t *testing.T) {
+	cases := []struct {
+		name      string
+		runWorker func(ctx context.Context, wc WorkerContext, events []StoredEvent) error
+	}{
+		{
+			name:      "plain handler strategy",
+			runWorker: handlerBatchStrategy{factory: func(WorkerContext) Handler { return &mockHandler{} }}.runWorker,
+		},
+		{
+			name:      "batch handler strategy",
+			runWorker: batchHandlerBatchStrategy{factory: func(WorkerContext) BatchHandler { return newMockBatchHandler() }}.runWorker,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lastID, processed, err := runParallel(context.Background(), nil, 4, tc.runWorker)
+			if err != nil {
+				t.Fatalf("runParallel on empty batch: %v", err)
+			}
+			if lastID != 0 {
+				t.Errorf("expected lastID 0, got %d", lastID)
+			}
+			if len(processed) != 0 {
+				t.Errorf("expected no processed events, got %d", len(processed))
+			}
+		})
+	}
+}

@@ -77,6 +77,12 @@ func runParallel(
 	n int,
 	runWorker func(ctx context.Context, wc WorkerContext, events []StoredEvent) error,
 ) (int64, []StoredEvent, error) {
+	// Nothing to process: return before indexing batch[len(batch)-1] below.
+	// Mirrors runSequential, which no-ops on an empty batch.
+	if len(batch) == 0 {
+		return 0, nil, nil
+	}
+
 	workers := make([][]StoredEvent, n)
 	for _, ev := range batch {
 		i := pickWorker(ev, n)
