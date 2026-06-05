@@ -73,6 +73,9 @@ func runParallel(
 	}
 
 	workers := make([][]StoredEvent, n)
+	if partitioner == nil {
+		partitioner = DefaultPartitionStrategy
+	}
 	for _, ev := range batch {
 		i := partitioner.Partition(ev, n)
 		workers[i] = append(workers[i], ev)
