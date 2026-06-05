@@ -2,9 +2,9 @@ package eventstore
 
 import (
 	"context"
-	"hash/fnv"
-	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // relayConfig carries the knobs collected from RelayOption. It is shared
@@ -17,30 +17,7 @@ type relayConfig struct {
 	batchDelay            time.Duration
 	conditionalBatchDelay time.Duration
 	parallelism           int
-}
-
-// pickWorker hashes the event's StreamID to a stable worker index. The same
-// StreamID always lands on the same worker for a given n, so per-stream
-// ordering is preserved across batches.
-func pickWorker(ev StoredEvent, n int) int {
-	if n <= 1 {
-		return 0
-	}
-	h := fnv.New32a()
-	id := ev.StreamID
-	_, _ = h.Write(id[:])
-	return int(h.Sum32() % uint32(n))
-}
-
-// recordFirstErr stores err in *dst if *dst is still nil, guarded by mu.
-// Used by the parallel worker pool to collect the first handler error
-// across workers.
-func recordFirstErr(mu *sync.Mutex, dst *error, err error) {
-	mu.Lock()
-	defer mu.Unlock()
-	if *dst == nil {
-		*dst = err
-	}
+	partitionStrategy     PartitionStrategy
 }
 
 // buildPlainHandler invokes the Handler factory for the given worker.
@@ -63,90 +40,58 @@ func buildBatchHandler(factory func(WorkerContext) BatchHandler, wc WorkerContex
 	return factory(wc)
 }
 
-// parallelWorkerArgs bundles the inputs that a strategy-specific worker
-// goroutine needs. The factory is typed (`Handler` or `BatchHandler`) —
-// the concrete strategy closes over the right one.
-type parallelWorkerArgs struct {
-	ctx      context.Context
-	ch       <-chan StoredEvent
-	wc       WorkerContext
-	errMu    *sync.Mutex
-	firstErr *error
-	cancel   context.CancelFunc
-}
-
-// runParallel orchestrates the worker pool: spawn one goroutine per
-// worker, dispatch each event by hash(StreamID), and wait for all workers
-// to drain. The startWorker closure is supplied by the concrete relay
-// type — it knows how to invoke the registered factories and the
-// per-event logic. The waitGroup is also created here so callers can
-// wg.Wait() after startWorker has been launched.
+// runParallel partitions the batch into n per-worker buckets using partitioner
+// and runs one goroutine per non-empty worker via errgroup. Partitioning
+// up front (rather than streaming events into per-worker channels) keeps
+// each event on a stable worker for the lifetime of a Run, so any
+// per-event ordering invariant the partitioner enforces is preserved
+// within a worker. The runWorker closure is supplied by the concrete
+// relay type — it knows how to invoke the registered factories and the
+// per-event logic.
 //
-// ctx is wrapped in a child context so the pool can broadcast cancellation
-// to all workers when the first one errors.
+// errgroup gives us the worker pool's bookkeeping for free: Wait blocks until
+// every worker drains, returns the first error any worker produced, and its
+// derived context is cancelled on that first error so the remaining workers
+// can bail out between events.
+//
+// Strict in the parallel path: per-event partitioning means partial
+// per-worker progress can't be merged into a single cursor update without
+// risking lost events. Any error — a cancelled context or a handler/Commit
+// failure — discards the whole batch so the next Run retries it from the last
+// committed position.
 func runParallel(
 	ctx context.Context,
 	batch []StoredEvent,
 	n int,
-	startWorker func(a parallelWorkerArgs, wg *sync.WaitGroup),
+	partitioner PartitionStrategy,
+	runWorker func(ctx context.Context, wc WorkerContext, events []StoredEvent) error,
 ) (int64, []StoredEvent, error) {
-	workers := make([]chan StoredEvent, n)
-	for i := range workers {
-		workers[i] = make(chan StoredEvent, len(batch))
+	// Nothing to process: return before indexing batch[len(batch)-1] below.
+	// Mirrors runSequential, which no-ops on an empty batch.
+	if len(batch) == 0 {
+		return 0, nil, nil
 	}
 
-	var (
-		wg       sync.WaitGroup
-		errMu    sync.Mutex
-		firstErr error
-	)
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	for i := range workers {
-		wg.Add(1)
-		go startWorker(parallelWorkerArgs{
-			ctx:      ctx,
-			ch:       workers[i],
-			wc:       WorkerContext{ID: i, Count: n},
-			errMu:    &errMu,
-			firstErr: &firstErr,
-			cancel:   cancel,
-		}, &wg)
+	workers := make([][]StoredEvent, n)
+	if partitioner == nil {
+		partitioner = DefaultPartitionStrategy
 	}
-
-	var dispatchErr error
 	for _, ev := range batch {
-		select {
-		case workers[pickWorker(ev, len(workers))] <- ev:
-		case <-ctx.Done():
-			// The context was cancelled mid-dispatch. Stop handing out
-			// events: reporting success here would advance the cursor
-			// (or clean up events) for a batch whose remaining events
-			// were never dispatched, silently losing them. Record the
-			// cancellation and fall through to drain the workers we
-			// already started so they don't leak.
-			dispatchErr = ctx.Err()
-		}
-		if dispatchErr != nil {
-			break
-		}
+		i := partitioner.Partition(ev, n)
+		workers[i] = append(workers[i], ev)
 	}
-	for _, ch := range workers {
-		close(ch)
-	}
-	wg.Wait()
 
-	// Strict in the parallel path: per-StreamID partitioning means partial
-	// per-worker progress can't be merged into a single cursor update
-	// without risking lost events. Any error — a cancelled dispatch or a
-	// handler/Commit failure — discards the whole batch so the next Run
-	// retries it from the last committed position.
-	if dispatchErr != nil {
-		return 0, nil, dispatchErr
+	g, ctx := errgroup.WithContext(ctx)
+	for i, events := range workers {
+		if len(events) == 0 {
+			continue
+		}
+		g.Go(func() error {
+			return runWorker(ctx, WorkerContext{ID: i, Count: n}, events)
+		})
 	}
-	if firstErr != nil {
-		return 0, nil, firstErr
+	if err := g.Wait(); err != nil {
+		return 0, nil, err
 	}
 	return batch[len(batch)-1].IncrementID, batch, nil
 }
@@ -171,10 +116,11 @@ type batchStrategy interface {
 	// events, and the first error (if any). It honours ctx cancellation
 	// between events.
 	runSequential(ctx context.Context, batch []StoredEvent) (int64, []StoredEvent, error)
-	// startParallelWorker is launched once per worker goroutine by
-	// runParallel; it drains the worker's channel and applies the
-	// per-event logic.
-	startParallelWorker(a parallelWorkerArgs, wg *sync.WaitGroup)
+	// runWorker processes the events routed to worker wc.ID on a single
+	// goroutine. runParallel launches it once per non-empty worker. It
+	// honours ctx cancellation between events so a sibling worker's error
+	// stops it promptly, and reports any handler/Commit failure.
+	runWorker(ctx context.Context, wc WorkerContext, events []StoredEvent) error
 }
 
 // --- handlerBatchStrategy --------------------------------------------
@@ -216,21 +162,19 @@ func (s handlerBatchStrategy) runSequential(ctx context.Context, batch []StoredE
 	return newLast, processed, nil
 }
 
-func (s handlerBatchStrategy) startParallelWorker(a parallelWorkerArgs, wg *sync.WaitGroup) {
-	defer wg.Done()
-	var handler Handler
-	sawEvent := false
-	for ev := range a.ch {
-		if !sawEvent {
-			handler = buildPlainHandler(s.factory, a.wc)
+func (s handlerBatchStrategy) runWorker(ctx context.Context, wc WorkerContext, events []StoredEvent) error {
+	handler := buildPlainHandler(s.factory, wc)
+	for _, ev := range events {
+		// Honour cancellation between events so a sibling worker's error
+		// (which errgroup turns into a ctx cancellation) stops us promptly.
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		sawEvent = true
-		if err := handler.Handle(a.ctx, ev); err != nil {
-			recordFirstErr(a.errMu, a.firstErr, err)
-			a.cancel()
-			return
+		if err := handler.Handle(ctx, ev); err != nil {
+			return err
 		}
 	}
+	return nil
 }
 
 // --- batchHandlerBatchStrategy ---------------------------------------
@@ -278,29 +222,22 @@ func (s batchHandlerBatchStrategy) runSequential(ctx context.Context, batch []St
 	return newLast, processed, nil
 }
 
-func (s batchHandlerBatchStrategy) startParallelWorker(a parallelWorkerArgs, wg *sync.WaitGroup) {
-	defer wg.Done()
-	var handler BatchHandler
-	sawEvent := false
-	for ev := range a.ch {
-		if !sawEvent {
-			handler = buildBatchHandler(s.factory, a.wc)
+func (s batchHandlerBatchStrategy) runWorker(ctx context.Context, wc WorkerContext, events []StoredEvent) error {
+	// runParallel never launches an empty worker, so there is always at
+	// least one event to handle and a Commit barrier to fire.
+	handler := buildBatchHandler(s.factory, wc)
+	for _, ev := range events {
+		// Honour cancellation between events. The Commit barrier has not
+		// fired yet, so the batch is not durably processed: discard it and
+		// let the next Run retry.
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		sawEvent = true
-		if err := handler.Handle(a.ctx, ev); err != nil {
-			recordFirstErr(a.errMu, a.firstErr, err)
-			a.cancel()
-			return
+		if err := handler.Handle(ctx, ev); err != nil {
+			return err
 		}
 	}
-	// Skip Commit on workers that never saw an event: a closed channel
-	// with no dispatches means the worker had nothing to flush.
-	if !sawEvent {
-		return
-	}
-	if err := handler.Commit(a.ctx); err != nil {
-		recordFirstErr(a.errMu, a.firstErr, err)
-		a.cancel()
-		return
-	}
+	// Commit barrier: flushes per-batch work (e.g. AMQP publish) once after
+	// every routed event was handled. A Commit failure discards the batch.
+	return handler.Commit(ctx)
 }

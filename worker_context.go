@@ -18,6 +18,8 @@ package eventstore
 // exactly once with ID == 0 and Count == 1. A given worker index is
 // stable for the lifetime of a single Run: events routed to that
 // worker always see the same Handler instance the factory produced.
+// Which events land on which worker is decided by the configured
+// PartitionStrategy (see WithPartitionStrategy).
 type WorkerContext struct {
 	ID    int
 	Count int
