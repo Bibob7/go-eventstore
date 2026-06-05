@@ -1,4 +1,4 @@
-package filter
+package eventstore
 
 import (
 	"context"
@@ -9,8 +9,6 @@ import (
 	"github.com/gofrs/uuid/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
-
-	"github.com/Bibob7/go-eventstore"
 )
 
 type mockGapDetector struct {
@@ -22,11 +20,11 @@ func (m *mockGapDetector) HasUncommittedID(ctx context.Context, lowerBound, uppe
 	return args.Bool(0), args.Error(1)
 }
 
-func eventsWithIDs(ids ...int64) []eventstore.StoredEvent {
-	events := make([]eventstore.StoredEvent, len(ids))
+func eventsWithIDs(ids ...int64) []StoredEvent {
+	events := make([]StoredEvent, len(ids))
 	for i, id := range ids {
 		uid, _ := uuid.NewV4()
-		events[i] = eventstore.StoredEvent{
+		events[i] = StoredEvent{
 			IncrementID: id,
 			ID:          uid,
 			StreamID:    uid,
@@ -38,7 +36,7 @@ func eventsWithIDs(ids ...int64) []eventstore.StoredEvent {
 	return events
 }
 
-func extractIDs(events []eventstore.StoredEvent) []int64 {
+func extractIDs(events []StoredEvent) []int64 {
 	ids := make([]int64, len(events))
 	for i, e := range events {
 		ids[i] = e.IncrementID
@@ -52,7 +50,7 @@ func TestGapDetectionEventFilter_Execute(t *testing.T) {
 	tests := []struct {
 		name            string
 		lastIncrementID int64
-		events          []eventstore.StoredEvent
+		events          []StoredEvent
 		setupDetector   func(*mockGapDetector)
 		wantIDs         []int64
 		wantErr         error
@@ -67,7 +65,7 @@ func TestGapDetectionEventFilter_Execute(t *testing.T) {
 		{
 			name:            "empty event list returns empty result",
 			lastIncrementID: 0,
-			events:          []eventstore.StoredEvent{},
+			events:          []StoredEvent{},
 			setupDetector:   func(_ *mockGapDetector) {},
 			wantIDs:         []int64{},
 		},

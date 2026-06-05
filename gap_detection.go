@@ -1,9 +1,7 @@
-package filter
+package eventstore
 
 import (
 	"context"
-
-	"github.com/Bibob7/go-eventstore"
 )
 
 type GapDetector interface {
@@ -15,7 +13,7 @@ type untilGapEventFilter struct {
 	gapDetector     GapDetector
 }
 
-func NewUntilGapEventFilter(lastIncrementID int64, gapDetector GapDetector) eventstore.Filter {
+func NewUntilGapEventFilter(lastIncrementID int64, gapDetector GapDetector) Filter {
 	return &untilGapEventFilter{
 		lastIncrementID: lastIncrementID,
 		gapDetector:     gapDetector,
@@ -23,9 +21,9 @@ func NewUntilGapEventFilter(lastIncrementID int64, gapDetector GapDetector) even
 }
 
 // Execute filters stored events based on increment ID gaps and detects uncommitted IDs using a gap detector contextually.
-func (f *untilGapEventFilter) Execute(ctx context.Context, storedEvents []eventstore.StoredEvent) ([]eventstore.StoredEvent, error) {
+func (f *untilGapEventFilter) Execute(ctx context.Context, storedEvents []StoredEvent) ([]StoredEvent, error) {
 	expectedIncrementID := f.lastIncrementID
-	var filteredEvents []eventstore.StoredEvent
+	var filteredEvents []StoredEvent
 
 	for i := 0; i < len(storedEvents); i++ {
 		storedEvent := storedEvents[i]

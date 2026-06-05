@@ -266,6 +266,7 @@ docker compose up --wait
 
 go run ./example/append/          # Appending events with and without a transaction
 go run ./example/outbox/          # Transactional outbox pattern (write + relay in one tx)
+go run ./example/gap_detection/   # Two interleaved gaps: relay resumes in order, drops nothing
 go run ./example/pointer_relay/   # PointerRelay with cursor-based position tracking
 go run ./example/transient_relay/ # TransientRelay that deletes events after processing
 ```

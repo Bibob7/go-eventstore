@@ -13,7 +13,6 @@ import (
 	"github.com/gofrs/uuid/v5"
 
 	"github.com/Bibob7/go-eventstore"
-	"github.com/Bibob7/go-eventstore/filter"
 )
 
 type EventStore struct {
@@ -100,7 +99,7 @@ func (s *EventStore) FetchBatchOfEventsSince(ctx context.Context, lastIncrementI
 	if err != nil {
 		return nil, err
 	}
-	return filter.NewUntilGapEventFilter(lastIncrementID, s).Execute(ctx, storedEvents)
+	return eventstore.NewUntilGapEventFilter(lastIncrementID, s).Execute(ctx, storedEvents)
 }
 
 func (s *EventStore) fetchBatchOfEvents(ctx context.Context, lastIncrementID int64, limit int) ([]eventstore.StoredEvent, error) {
