@@ -1,6 +1,25 @@
 # Go Event Store
 
-A lightweight Go library for the [transactional outbox pattern](https://microservices.io/patterns/data/transactional-outbox.html). It provides the core abstractions for appending domain events and relaying them to handlers with gap-safe, cursor-based ordering (a [polling publisher](https://microservices.io/patterns/data/polling-publisher.html)).
+A lightweight Go library for storing domain events in an append-only log and
+processing them reliably. Events are appended with a monotonic position
+(`IncrementID`) and consumed by **relays** that dispatch them to your handlers
+with gap-safe, cursor-based ordering. Each relay tracks its own position, so
+multiple independent consumers can read the same events without coordinating.
+
+It is a small building block, not a full event-sourcing framework: it gives you
+a durable event log and reliable, ordered delivery to handlers — you decide what
+to do with the events. That makes it a foundation for several patterns:
+
+- **Event-driven processing & read models** — point several `PointerRelay`s at
+  the same log, each with its own cursor, to build projections or trigger side
+  effects. Events are retained, so consumers can be added or replayed later.
+- **Transactional outbox** — append events in the same transaction as your
+  business data, then relay them to a message broker (a
+  [polling publisher](https://microservices.io/patterns/data/polling-publisher.html)
+  over the [transactional outbox](https://microservices.io/patterns/data/transactional-outbox.html)).
+  A `TransientRelay` deletes events after processing so the table does not grow.
+
+The core module has no database dependency; a MySQL implementation is provided.
 
 ## Modules
 
@@ -36,16 +55,16 @@ cfg := mysqlstore.Config{
 
 ```go
 type OrderPlaced struct {
-    id          uuid.UUID
-    streamID uuid.UUID
-    occurredAt  time.Time
-    OrderID     string
+    id         uuid.UUID
+    streamID   uuid.UUID
+    occurredAt time.Time
+    OrderID    string
 }
 
-func (e OrderPlaced) ID() uuid.UUID          { return e.id }
-func (e OrderPlaced) StreamID() uuid.UUID { return e.streamID }
-func (e OrderPlaced) EventType() string      { return "OrderPlaced" }
-func (e OrderPlaced) OccurredAt() time.Time  { return e.occurredAt }
+func (e OrderPlaced) ID() uuid.UUID         { return e.id }
+func (e OrderPlaced) StreamID() uuid.UUID   { return e.streamID }
+func (e OrderPlaced) EventType() string     { return "OrderPlaced" }
+func (e OrderPlaced) OccurredAt() time.Time { return e.occurredAt }
 ```
 
 ### 2. Append events
@@ -54,10 +73,10 @@ func (e OrderPlaced) OccurredAt() time.Time  { return e.occurredAt }
 store := mysqlstore.NewEventStore(db, "outbox")
 
 err := store.Append(ctx, OrderPlaced{
-    id:          uuid.Must(uuid.NewV4()),
-    streamID: orderID,
-    occurredAt:  time.Now(),
-    OrderID:     "ord-123",
+    id:         uuid.Must(uuid.NewV4()),
+    streamID:   orderID,
+    occurredAt: time.Now(),
+    OrderID:    "ord-123",
 })
 ```
 
@@ -140,7 +159,7 @@ relay := eventstore.NewTransientHandlerRelay(
 
 ## Parallel relay (worker pool)
 
-For high-throughput outbox relays, `WithParallelism(n)` shards each batch across `n` worker goroutines. Events are routed to workers by hashing the event's `StreamID` with `fnv32a`, so all events of a given stream are processed sequentially on the same worker — preserving per-stream ordering while running different streams in parallel.
+For high-throughput relays, `WithParallelism(n)` shards each batch across `n` worker goroutines. Events are routed to workers by hashing the event's `StreamID` with `fnv32a`, so all events of a given stream are processed sequentially on the same worker — preserving per-stream ordering while running different streams in parallel.
 
 ### Per-worker state: the factory
 
@@ -199,7 +218,7 @@ Plain `Handler` relays (`NewPointerHandlerRelay` / `NewTransientHandlerRelay`) h
 
 ## Glossary
 
-The types below are the building blocks of the library. For the broader patterns they implement, see the [transactional outbox](https://microservices.io/patterns/data/transactional-outbox.html) and [polling publisher](https://microservices.io/patterns/data/polling-publisher.html) patterns.
+The types below are the building blocks of the library. They combine into an append-only event log with cursor-based relays; for the transactional-outbox use case specifically, see the [transactional outbox](https://microservices.io/patterns/data/transactional-outbox.html) and [polling publisher](https://microservices.io/patterns/data/polling-publisher.html) patterns.
 
 ### Events
 
