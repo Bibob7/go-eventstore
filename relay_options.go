@@ -29,22 +29,42 @@ func WithConditionalBatchDelay(d time.Duration) RelayOption {
 	}
 }
 
-// WithParallelism runs the relay across n worker goroutines partitioned by
-// the event's StreamID (fnv32a(StreamID) % n). All events of a given
-// stream are processed sequentially on the same worker, preserving
-// stream ordering. n must be >= 1; values < 1 are clamped to 1.
+// WithParallelism runs the relay across n worker goroutines. Each event
+// is routed to a worker by the configured PartitionStrategy (see
+// WithPartitionStrategy); the default strategy hashes StreamID with
+// fnv32a and reduces modulo n, so all events of a given stream are
+// processed sequentially on the same worker, preserving stream
+// ordering. n must be >= 1; values < 1 are clamped to 1.
 //
 // On a BatchHandler relay, the factory produces one BatchHandler per
 // worker and Commit fires once per worker per batch. On a plain-Handler
 // relay, the factory produces one Handler per worker; the relay is strict
 // all-or-nothing in the parallel path regardless of strategy (the
-// per-StreamID partitioning makes partial per-worker progress unsafe
-// to merge into a single cursor update).
+// per-event partitioning makes partial per-worker progress unsafe to
+// merge into a single cursor update).
 func WithParallelism(n int) RelayOption {
 	return func(c *relayConfig) {
 		if n < 1 {
 			n = 1
 		}
 		c.parallelism = n
+	}
+}
+
+// WithPartitionStrategy replaces the strategy used to route events to
+// workers in the parallel path. The default (DefaultPartitionStrategy)
+// hashes StreamID with fnv32a; a custom strategy can implement
+// round-robin, key extraction, or any other partitioning scheme —
+// provided the same event always maps to the same worker index for a
+// given workerCount, so per-event ordering invariants survive a Run.
+//
+// Passing nil falls back to DefaultPartitionStrategy so the option is
+// always safe to apply.
+func WithPartitionStrategy(s PartitionStrategy) RelayOption {
+	return func(c *relayConfig) {
+		if s == nil {
+			s = DefaultPartitionStrategy
+		}
+		c.partitionStrategy = s
 	}
 }
