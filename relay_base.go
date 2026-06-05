@@ -53,12 +53,13 @@ func buildBatchHandler(factory func(WorkerContext) BatchHandler, wc WorkerContex
 	return factory(wc)
 }
 
-// runParallel partitions the batch into n forks by hash(StreamID) and runs
-// one goroutine per non-empty fork via errgroup. Partitioning up front (rather
-// than streaming events into per-worker channels) keeps each StreamID on a
-// stable worker, so per-stream ordering is preserved within a fork. The
-// runWorker closure is supplied by the concrete relay type — it knows how to
-// invoke the registered factories and the per-event logic.
+// runParallel partitions the batch into n per-worker buckets by
+// hash(StreamID) and runs one goroutine per non-empty worker via errgroup.
+// Partitioning up front (rather than streaming events into per-worker
+// channels) keeps each StreamID on a stable worker, so per-stream ordering is
+// preserved within a worker. The runWorker closure is supplied by the concrete
+// relay type — it knows how to invoke the registered factories and the
+// per-event logic.
 //
 // errgroup gives us the worker pool's bookkeeping for free: Wait blocks until
 // every worker drains, returns the first error any worker produced, and its
@@ -76,14 +77,14 @@ func runParallel(
 	n int,
 	runWorker func(ctx context.Context, wc WorkerContext, events []StoredEvent) error,
 ) (int64, []StoredEvent, error) {
-	forks := make([][]StoredEvent, n)
+	workers := make([][]StoredEvent, n)
 	for _, ev := range batch {
 		i := pickWorker(ev, n)
-		forks[i] = append(forks[i], ev)
+		workers[i] = append(workers[i], ev)
 	}
 
 	g, ctx := errgroup.WithContext(ctx)
-	for i, events := range forks {
+	for i, events := range workers {
 		if len(events) == 0 {
 			continue
 		}
@@ -117,8 +118,8 @@ type batchStrategy interface {
 	// events, and the first error (if any). It honours ctx cancellation
 	// between events.
 	runSequential(ctx context.Context, batch []StoredEvent) (int64, []StoredEvent, error)
-	// runWorker processes one fork (the events routed to worker wc.ID) on a
-	// single goroutine. runParallel launches it once per non-empty fork. It
+	// runWorker processes the events routed to worker wc.ID on a single
+	// goroutine. runParallel launches it once per non-empty worker. It
 	// honours ctx cancellation between events so a sibling worker's error
 	// stops it promptly, and reports any handler/Commit failure.
 	runWorker(ctx context.Context, wc WorkerContext, events []StoredEvent) error
@@ -224,8 +225,8 @@ func (s batchHandlerBatchStrategy) runSequential(ctx context.Context, batch []St
 }
 
 func (s batchHandlerBatchStrategy) runWorker(ctx context.Context, wc WorkerContext, events []StoredEvent) error {
-	// runParallel never launches a worker for an empty fork, so there is
-	// always at least one event to handle and a Commit barrier to fire.
+	// runParallel never launches an empty worker, so there is always at
+	// least one event to handle and a Commit barrier to fire.
 	handler := buildBatchHandler(s.factory, wc)
 	for _, ev := range events {
 		// Honour cancellation between events. The Commit barrier has not
