@@ -69,7 +69,7 @@ func prepareDemoTables(db *sql.DB) error {
 			PRIMARY KEY (id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		"TRUNCATE TABLE orders",
-		"TRUNCATE TABLE outbox",
+		"TRUNCATE TABLE event_store",
 	}
 	for _, stmt := range statements {
 		if _, err := db.Exec(stmt); err != nil {

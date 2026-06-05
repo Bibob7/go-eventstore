@@ -58,7 +58,7 @@ func run() error {
 		return fmt.Errorf("prepare demo tables: %w", err)
 	}
 
-	store := mysql.NewEventStore(db, "outbox")
+	store := mysql.NewEventStore(db, "event_store")
 	repo := &orderRepository{db: db, eventStore: store}
 
 	ctx := context.Background()
