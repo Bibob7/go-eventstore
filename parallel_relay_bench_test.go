@@ -9,7 +9,7 @@ import (
 
 // BenchmarkParallelPointerRelay measures the throughput of a PointerRelay
 // across varying worker counts and batch sizes. The fixture spreads events
-// across 100 distinct EntityIDs (200 events per entity) so workers are
+// across 100 distinct StreamIDs (200 events per stream) so workers are
 // evenly partitioned and stream consistency is exercised. Run with:
 //
 //	go test -bench=BenchmarkParallelPointerRelay -benchmem -run=^$ ./...
@@ -32,19 +32,19 @@ func BenchmarkParallelPointerRelay(b *testing.B) {
 			store := &benchPointerStore{}
 			incStore := newBenchIncrementIDStore()
 
-			// Seed 100 distinct entities with 200 events each, in a
+			// Seed 100 distinct streams with 200 events each, in a
 			// round-robin pattern so pickWorker distributes them across
 			// all available workers.
-			entityIDs := make([]uuid.UUID, 100)
-			for i := range entityIDs {
-				entityIDs[i] = uuid.Must(uuid.NewV4())
+			streamIDs := make([]uuid.UUID, 100)
+			for i := range streamIDs {
+				streamIDs[i] = uuid.Must(uuid.NewV4())
 			}
-			const totalEntities = 100
-			const eventsPerEntity = 200
-			domainEvents := make([]DomainEvent, 0, totalEntities*eventsPerEntity)
-			for i := 0; i < totalEntities*eventsPerEntity; i++ {
+			const totalStreams = 100
+			const eventsPerStream = 200
+			domainEvents := make([]DomainEvent, 0, totalStreams*eventsPerStream)
+			for i := 0; i < totalStreams*eventsPerStream; i++ {
 				ev := newBenchEvent(int64(i + 1)).(*benchDomainEvent)
-				ev.entityID = entityIDs[i%totalEntities]
+				ev.streamID = streamIDs[i%totalStreams]
 				domainEvents = append(domainEvents, ev)
 			}
 			if err := store.Append(context.Background(), domainEvents...); err != nil {
@@ -128,16 +128,16 @@ func BenchmarkParallelPointerRelayWithWork(b *testing.B) {
 			store := &benchPointerStore{}
 			incStore := newBenchIncrementIDStore()
 
-			entityIDs := make([]uuid.UUID, 100)
-			for i := range entityIDs {
-				entityIDs[i] = uuid.Must(uuid.NewV4())
+			streamIDs := make([]uuid.UUID, 100)
+			for i := range streamIDs {
+				streamIDs[i] = uuid.Must(uuid.NewV4())
 			}
-			const totalEntities = 100
-			const eventsPerEntity = 200
-			domainEvents := make([]DomainEvent, 0, totalEntities*eventsPerEntity)
-			for i := 0; i < totalEntities*eventsPerEntity; i++ {
+			const totalStreams = 100
+			const eventsPerStream = 200
+			domainEvents := make([]DomainEvent, 0, totalStreams*eventsPerStream)
+			for i := 0; i < totalStreams*eventsPerStream; i++ {
 				ev := newBenchEvent(int64(i + 1)).(*benchDomainEvent)
-				ev.entityID = entityIDs[i%totalEntities]
+				ev.streamID = streamIDs[i%totalStreams]
 				domainEvents = append(domainEvents, ev)
 			}
 			if err := store.Append(context.Background(), domainEvents...); err != nil {

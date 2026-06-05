@@ -78,7 +78,7 @@ func newPointerRelay(name string, store PointerStore, incrementIDStore Increment
 // (parallelism <= 1). If a Handle call fails mid-batch, the cursor
 // advances up to the last successfully processed event so the next Run
 // resumes from there. In the parallel path (parallelism > 1) the relay
-// is strict all-or-nothing because the per-EntityID partitioning makes
+// is strict all-or-nothing because the per-StreamID partitioning makes
 // per-worker partial progress unsafe to merge into a single cursor
 // update.
 //

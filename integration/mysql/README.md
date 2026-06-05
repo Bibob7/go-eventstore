@@ -14,7 +14,17 @@ The required tables are defined in [`sql/mysql/schema.sql`](sql/mysql/schema.sql
 | Table | Purpose |
 |---|---|
 | `outbox` | Stores domain events before they are relayed |
-| `event_increment_id` | Persists the last processed position per relay consumer with optimistic locking support |
+| `event_increment_id` | Persists the last processed position per relay with optimistic locking support |
+
+### Migrating an existing database
+
+The position column on `event_increment_id` was renamed from `consumer_name`
+to `relay_name`. Existing deployments need a one-time migration (adjust the
+table name if you configured a custom `IncrementIDTableName`):
+
+```sql
+ALTER TABLE event_increment_id RENAME COLUMN consumer_name TO relay_name;
+```
 
 ## Examples
 

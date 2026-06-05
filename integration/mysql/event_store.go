@@ -60,13 +60,13 @@ func (s *EventStore) Append(ctx context.Context, domainEvents ...eventstore.Doma
 			return err
 		}
 
-		binaryAggregateId, err := domainEvent.AggregateID().MarshalBinary()
+		binaryStreamId, err := domainEvent.StreamID().MarshalBinary()
 		if err != nil {
 			return err
 		}
 
 		valuesArgs[j] = binaryId
-		valuesArgs[j+1] = binaryAggregateId
+		valuesArgs[j+1] = binaryStreamId
 		valuesArgs[j+2] = domainEvent.EventType()
 		valuesArgs[j+3] = eventPayloadJsonString
 		// Always persist in UTC so reads are timezone-stable, independent of
@@ -75,7 +75,7 @@ func (s *EventStore) Append(ctx context.Context, domainEvents ...eventstore.Doma
 	}
 
 	// #nosec G201 -- tableName is validated in the constructor.
-	sqlStmt := fmt.Sprintf("INSERT INTO %s (event_id, aggregate_id, event_type, payload, occurred_at) VALUES %s", s.tableName, strings.Join(valuesStrings, ","))
+	sqlStmt := fmt.Sprintf("INSERT INTO %s (event_id, stream_id, event_type, payload, occurred_at) VALUES %s", s.tableName, strings.Join(valuesStrings, ","))
 
 	if tx, exists := GetTx(ctx); exists {
 		slog.Debug("Appending domainEvents to DomainEvent eventStore in transaction")
@@ -106,7 +106,7 @@ func (s *EventStore) FetchBatchOfEventsSince(ctx context.Context, lastIncrementI
 func (s *EventStore) fetchBatchOfEvents(ctx context.Context, lastIncrementID int64, limit int) ([]eventstore.StoredEvent, error) {
 	// #nosec G201 -- tableName is validated in the constructor.
 	selectStmt := fmt.Sprintf(
-		"SELECT id, event_id, aggregate_id, event_type, payload, occurred_at FROM %s",
+		"SELECT id, event_id, stream_id, event_type, payload, occurred_at FROM %s",
 		s.tableName)
 	queryArgs := []interface{}{limit}
 	if lastIncrementID >= 0 {
@@ -192,12 +192,12 @@ func (s *EventStore) transformToStoredEvents(rows *sql.Rows) ([]eventstore.Store
 		var (
 			id           int64
 			eventID      []byte
-			aggregateID  []byte
+			streamID     []byte
 			eventPayload string
 			eventType    string
 			occurredAt   string
 		)
-		err := rows.Scan(&id, &eventID, &aggregateID, &eventType, &eventPayload, &occurredAt)
+		err := rows.Scan(&id, &eventID, &streamID, &eventType, &eventPayload, &occurredAt)
 		if err != nil {
 			return nil, err
 		}
@@ -214,15 +214,15 @@ func (s *EventStore) transformToStoredEvents(rows *sql.Rows) ([]eventstore.Store
 			return nil, err
 		}
 
-		uuidAggregateID := uuid.UUID{}
-		if err := uuidAggregateID.UnmarshalBinary(aggregateID); err != nil {
+		uuidStreamID := uuid.UUID{}
+		if err := uuidStreamID.UnmarshalBinary(streamID); err != nil {
 			return nil, err
 		}
 
 		events = append(events, eventstore.StoredEvent{
 			IncrementID: id,
 			ID:          uuidEventID,
-			EntityID:    uuidAggregateID,
+			StreamID:    uuidStreamID,
 			EventType:   eventType,
 			Payload:     eventPayload,
 			OccurredAt:  occurredOnTime,

@@ -22,7 +22,7 @@ type order struct {
 
 func newOrder(event *shared.OrderPlaced) order {
 	return order{
-		ID:       event.AggregateID().String(),
+		ID:       event.StreamID().String(),
 		Customer: event.CustomerID,
 		Product:  event.Product,
 		Amount:   event.Amount,

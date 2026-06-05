@@ -45,7 +45,7 @@ func run() error {
 	}
 
 	bundle := mysqlstore.NewEventStoreBundle(db, mysqlstore.Config{
-		OutboxTableName:      "outbox",
+		EventStoreTableName:  "outbox",
 		IncrementIDTableName: "event_increment_id",
 	})
 
@@ -64,7 +64,7 @@ func run() error {
 	fmt.Printf("  appended %s (bob / monitor)\n", e2.ID())
 
 	// --- 2. Append inside a transaction ---
-	// In a real service you would also INSERT your business entity here
+	// In a real service you would also INSERT your business stream here
 	// so the event and the state change commit atomically.
 	fmt.Println("\n=== Appending event inside a transaction ===")
 

@@ -29,7 +29,7 @@ func eventsWithIDs(ids ...int64) []eventstore.StoredEvent {
 		events[i] = eventstore.StoredEvent{
 			IncrementID: id,
 			ID:          uid,
-			EntityID:    uid,
+			StreamID:    uid,
 			EventType:   "test_event",
 			Payload:     "{}",
 			OccurredAt:  time.Now(),

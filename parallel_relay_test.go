@@ -18,7 +18,7 @@ type mockBatchHandler struct {
 	mu sync.Mutex
 
 	handleEvents     []StoredEvent
-	handleByEntity   map[uuid.UUID][]StoredEvent
+	handleByStream   map[uuid.UUID][]StoredEvent
 	commitCalls      int
 	commitErr        error
 	handleErr        error
@@ -30,7 +30,7 @@ type mockBatchHandler struct {
 
 func newMockBatchHandler() *mockBatchHandler {
 	return &mockBatchHandler{
-		handleByEntity: make(map[uuid.UUID][]StoredEvent),
+		handleByStream: make(map[uuid.UUID][]StoredEvent),
 	}
 }
 
@@ -41,7 +41,7 @@ func (m *mockBatchHandler) Handle(ctx context.Context, ev StoredEvent) error {
 	m.calls++
 	n := m.calls
 	m.handleEvents = append(m.handleEvents, ev)
-	m.handleByEntity[ev.EntityID] = append(m.handleByEntity[ev.EntityID], ev)
+	m.handleByStream[ev.StreamID] = append(m.handleByStream[ev.StreamID], ev)
 	sleep := m.handleSleep
 	err := m.handleErr
 	m.mu.Unlock()
@@ -73,17 +73,17 @@ func (m *mockBatchHandler) Commit(_ context.Context) error {
 	return err
 }
 
-// newEventsByEntities produces StoredEvents with explicit EntityID assignment
+// newEventsByStreams produces StoredEvents with explicit StreamID assignment
 // so tests can control which worker an event lands on.
-func newEventsByEntities(incrementIDs []int64, entityIDs []uuid.UUID) []StoredEvent {
-	if len(incrementIDs) != len(entityIDs) {
-		panic("incrementIDs and entityIDs must have the same length")
+func newEventsByStreams(incrementIDs []int64, streamIDs []uuid.UUID) []StoredEvent {
+	if len(incrementIDs) != len(streamIDs) {
+		panic("incrementIDs and streamIDs must have the same length")
 	}
 	out := make([]StoredEvent, len(incrementIDs))
 	for i, id := range incrementIDs {
 		out[i] = StoredEvent{
 			ID:          uuid.Must(uuid.NewV4()),
-			EntityID:    entityIDs[i],
+			StreamID:    streamIDs[i],
 			IncrementID: id,
 			EventType:   "test-event",
 			OccurredAt:  time.Now(),
@@ -94,19 +94,19 @@ func newEventsByEntities(incrementIDs []int64, entityIDs []uuid.UUID) []StoredEv
 
 // ---- processBatch unit tests -----------------------------------------
 
-func TestProcessBatch_DispatchingByEntityID(t *testing.T) {
-	// Two entities, multiple events each. All events of entityA must land on
-	// the same worker, and likewise for entityB.
-	entityA := uuid.Must(uuid.NewV4())
-	entityB := uuid.Must(uuid.NewV4())
+func TestProcessBatch_DispatchingByStreamID(t *testing.T) {
+	// Two streams, multiple events each. All events of streamA must land on
+	// the same worker, and likewise for streamB.
+	streamA := uuid.Must(uuid.NewV4())
+	streamB := uuid.Must(uuid.NewV4())
 
-	// Force entityA to worker 0 and entityB to worker 2 by picking EntityIDs
+	// Force streamA to worker 0 and streamB to worker 2 by picking StreamIDs
 	// whose first byte maps cleanly. We can't dictate the worker index
-	// (pickWorker is fnv32a(EntityID)), so we just assert the partition
-	// invariant: every event of the same entity went to the same worker.
-	events := newEventsByEntities(
+	// (pickWorker is fnv32a(StreamID)), so we just assert the partition
+	// invariant: every event of the same stream went to the same worker.
+	events := newEventsByStreams(
 		[]int64{1, 2, 3, 4, 5, 6},
-		[]uuid.UUID{entityA, entityA, entityA, entityB, entityB, entityB},
+		[]uuid.UUID{streamA, streamA, streamA, streamB, streamB, streamB},
 	)
 
 	h := newMockBatchHandler()
@@ -124,32 +124,32 @@ func TestProcessBatch_DispatchingByEntityID(t *testing.T) {
 	}
 
 	for _, ev := range events {
-		entityWorker := pickWorker(ev, 4)
-		for _, seen := range h.handleByEntity[ev.EntityID] {
+		streamWorker := pickWorker(ev, 4)
+		for _, seen := range h.handleByStream[ev.StreamID] {
 			seenWorker := pickWorker(seen, 4)
-			if entityWorker != seenWorker {
-				t.Errorf("entity %s: events split across workers %d and %d",
-					ev.EntityID, entityWorker, seenWorker)
+			if streamWorker != seenWorker {
+				t.Errorf("stream %s: events split across workers %d and %d",
+					ev.StreamID, streamWorker, seenWorker)
 			}
 		}
 	}
 }
 
 func TestProcessBatch_CommitOncePerWorker(t *testing.T) {
-	// 4 entities (each routed to its own worker) => exactly 4 Commit calls.
-	// Use entities whose pickWorker index is distinct.
-	entities := make([]uuid.UUID, 4)
-	entityToWorker := make(map[uuid.UUID]int)
-	for i := range entities {
+	// 4 streams (each routed to its own worker) => exactly 4 Commit calls.
+	// Use streams whose pickWorker index is distinct.
+	streams := make([]uuid.UUID, 4)
+	streamToWorker := make(map[uuid.UUID]int)
+	for i := range streams {
 		for {
 			uid := uuid.Must(uuid.NewV4())
-			idx := pickWorker(StoredEvent{EntityID: uid}, 4)
-			if _, taken := entityToWorker[uid]; taken {
+			idx := pickWorker(StoredEvent{StreamID: uid}, 4)
+			if _, taken := streamToWorker[uid]; taken {
 				continue
 			}
-			// Make sure this entity is uniquely routed.
+			// Make sure this stream is uniquely routed.
 			duplicate := false
-			for _, w := range entityToWorker {
+			for _, w := range streamToWorker {
 				if w == idx {
 					duplicate = true
 					break
@@ -158,8 +158,8 @@ func TestProcessBatch_CommitOncePerWorker(t *testing.T) {
 			if duplicate {
 				continue
 			}
-			entities[i] = uid
-			entityToWorker[uid] = idx
+			streams[i] = uid
+			streamToWorker[uid] = idx
 			break
 		}
 	}
@@ -167,11 +167,11 @@ func TestProcessBatch_CommitOncePerWorker(t *testing.T) {
 	var events []StoredEvent
 	var ids []int64
 	var entIDs []uuid.UUID
-	for i, e := range entities {
+	for i, e := range streams {
 		ids = append(ids, int64(i+1))
 		entIDs = append(entIDs, e)
 	}
-	events = newEventsByEntities(ids, entIDs)
+	events = newEventsByStreams(ids, entIDs)
 
 	h := newMockBatchHandler()
 	relay := NewPointerBatchHandlerRelay(
@@ -375,15 +375,15 @@ func TestProcessBatch_SequentialBatchHandlerCancelDiscards(t *testing.T) {
 }
 
 func TestProcessBatch_ErrEventNotReadyToProcess(t *testing.T) {
-	// Use 3 events, all routed to the same worker (via a single EntityID) so
+	// Use 3 events, all routed to the same worker (via a single StreamID) so
 	// the failure mid-batch happens on the same worker that processed the
 	// earlier events. That worker must NOT call Commit after the failure;
 	// events 1 and 2 are also handled by the same worker, so they cannot
 	// have committed either.
-	entity := uuid.Must(uuid.NewV4())
-	events := newEventsByEntities(
+	stream := uuid.Must(uuid.NewV4())
+	events := newEventsByStreams(
 		[]int64{1, 2, 3},
-		[]uuid.UUID{entity, entity, entity},
+		[]uuid.UUID{stream, stream, stream},
 	)
 	h := &mockBatchHandlerAdapter{errOnCall: 3, err: ErrEventNotReadyToProcess}
 	relay := NewPointerBatchHandlerRelay(
@@ -409,12 +409,12 @@ func TestProcessBatch_ErrEventNotReadyToProcess(t *testing.T) {
 
 func TestProcessBatch_HandlerErrorAbortsPool(t *testing.T) {
 	boom := errors.New("boom")
-	// Same single-entity setup so the failing worker is the one that would
+	// Same single-stream setup so the failing worker is the one that would
 	// have called Commit; after the error, no Commit must run.
-	entity := uuid.Must(uuid.NewV4())
-	events := newEventsByEntities(
+	stream := uuid.Must(uuid.NewV4())
+	events := newEventsByStreams(
 		[]int64{1, 2, 3},
-		[]uuid.UUID{entity, entity, entity},
+		[]uuid.UUID{stream, stream, stream},
 	)
 	h := &mockBatchHandlerAdapter{errOnCall: 2, err: boom}
 	relay := NewPointerBatchHandlerRelay(
@@ -458,10 +458,10 @@ func TestProcessBatch_CommitError(t *testing.T) {
 func TestProcessBatch_ContextCancelDuringDispatch(t *testing.T) {
 	// A handler that blocks until ctx is done. Cancel from a goroutine after
 	// a short delay and assert the pool exits cleanly.
-	entity := uuid.Must(uuid.NewV4())
-	events := newEventsByEntities(
+	stream := uuid.Must(uuid.NewV4())
+	events := newEventsByStreams(
 		[]int64{1, 2, 3, 4},
-		[]uuid.UUID{entity, entity, entity, entity},
+		[]uuid.UUID{stream, stream, stream, stream},
 	)
 	h := newMockBatchHandler()
 	h.handleSleep = 100 * time.Millisecond
@@ -595,19 +595,19 @@ func (c *counterHandler) Name() string { return "counter" }
 
 func (c *counterHandler) Handle(_ context.Context, ev StoredEvent) error {
 	c.mu.Lock()
-	c.seen = append(c.seen, ev.EntityID)
+	c.seen = append(c.seen, ev.StreamID)
 	c.mu.Unlock()
 	return nil
 }
 
 func TestHandlerFactory_OneInstancePerWorker(t *testing.T) {
 	// With WithParallelism(3) and one registered factory, the factory must
-	// be invoked exactly 3 times — once per worker. We pick entities that
+	// be invoked exactly 3 times — once per worker. We pick streams that
 	// hash to different workers so all three workers receive at least one
 	// event and the factory fires for each. Additionally, every invocation
 	// must see a WorkerContext with Count == 3 and a unique ID in [0, 3).
-	entities := pickDistinctEntities(t, 3, 3)
-	events := newEventsByEntities([]int64{1, 2, 3}, entities)
+	streams := pickDistinctStreams(t, 3, 3)
+	events := newEventsByStreams([]int64{1, 2, 3}, streams)
 	var (
 		factoryCalls   atomic.Int32
 		seenWorkerIDs  sync.Map
@@ -646,17 +646,17 @@ func TestHandlerFactory_OneInstancePerWorker(t *testing.T) {
 	}
 }
 
-// pickDistinctEntities returns n UUIDs whose pickWorker(EntityID, workers) is
+// pickDistinctStreams returns n UUIDs whose pickWorker(StreamID, workers) is
 // a unique value in [0, workers). The set is built by trial-and-error using
 // fresh UUIDs; it is bounded to a small fixed number of attempts so a test
 // fails fast on hash collisions rather than spinning forever.
-func pickDistinctEntities(t *testing.T, n, workers int) []uuid.UUID {
+func pickDistinctStreams(t *testing.T, n, workers int) []uuid.UUID {
 	t.Helper()
 	out := make([]uuid.UUID, 0, n)
 	seen := make(map[int]struct{}, n)
 	for attempts := 0; attempts < 1000 && len(out) < n; attempts++ {
 		id := uuid.Must(uuid.NewV4())
-		idx := pickWorker(StoredEvent{EntityID: id}, workers)
+		idx := pickWorker(StoredEvent{StreamID: id}, workers)
 		if _, ok := seen[idx]; ok {
 			continue
 		}
@@ -664,7 +664,7 @@ func pickDistinctEntities(t *testing.T, n, workers int) []uuid.UUID {
 		out = append(out, id)
 	}
 	if len(out) < n {
-		t.Fatalf("could not find %d entities hashing to distinct workers in %d", n, workers)
+		t.Fatalf("could not find %d streams hashing to distinct workers in %d", n, workers)
 	}
 	return out
 }
@@ -674,10 +674,10 @@ func TestHandlerFactory_DistinctInstancesPerWorker(t *testing.T) {
 	// by a unique id assigned in the factory. The id is sourced from
 	// WorkerContext.ID so we additionally assert that worker ID < Count
 	// and the per-instance id is the same as the worker ID we observed at
-	// factory time. Use entities that hash to distinct workers so all 3
+	// factory time. Use streams that hash to distinct workers so all 3
 	// instances are actually built.
-	entities := pickDistinctEntities(t, 3, 3)
-	events := newEventsByEntities([]int64{1, 2, 3}, entities)
+	streams := pickDistinctStreams(t, 3, 3)
+	events := newEventsByStreams([]int64{1, 2, 3}, streams)
 	var instancesMu sync.Mutex
 	instances := make(map[int]*counterHandler)
 	relay := NewPointerHandlerRelay(
@@ -715,32 +715,32 @@ func TestHandlerFactory_DistinctInstancesPerWorker(t *testing.T) {
 		t.Errorf("expected 3 events distributed across instances, got %d", totalSeen)
 	}
 	// Every event must have landed on exactly one instance.
-	allEntities := make(map[uuid.UUID]int)
+	allStreams := make(map[uuid.UUID]int)
 	for _, c := range instances {
 		c.mu.Lock()
 		for _, e := range c.seen {
-			allEntities[e]++
+			allStreams[e]++
 		}
 		c.mu.Unlock()
 	}
-	for e, n := range allEntities {
+	for e, n := range allStreams {
 		if n != 1 {
-			t.Errorf("entity %s seen by %d instances, want 1", e, n)
+			t.Errorf("stream %s seen by %d instances, want 1", e, n)
 		}
 	}
 }
 
 func TestHandlerFactory_StreamCoherenceWithFactory(t *testing.T) {
-	// Events of the same entity must all be handled by the same instance.
-	entityA := uuid.Must(uuid.NewV4())
-	entityB := uuid.Must(uuid.NewV4())
-	events := newEventsByEntities(
+	// Events of the same stream must all be handled by the same instance.
+	streamA := uuid.Must(uuid.NewV4())
+	streamB := uuid.Must(uuid.NewV4())
+	events := newEventsByStreams(
 		[]int64{1, 2, 3, 4, 5, 6},
-		[]uuid.UUID{entityA, entityA, entityA, entityB, entityB, entityB},
+		[]uuid.UUID{streamA, streamA, streamA, streamB, streamB, streamB},
 	)
 
 	var mu sync.Mutex
-	instances := make(map[uuid.UUID][]int) // entity -> instance ids seen
+	instances := make(map[uuid.UUID][]int) // stream -> instance ids seen
 	relay := NewPointerHandlerRelay(
 		"test-handler-factory-coherence",
 		&mockPointerStore{events: events},
@@ -750,7 +750,7 @@ func TestHandlerFactory_StreamCoherenceWithFactory(t *testing.T) {
 				id: wc.ID,
 				onSee: func(ev StoredEvent, instanceID int) {
 					mu.Lock()
-					instances[ev.EntityID] = append(instances[ev.EntityID], instanceID)
+					instances[ev.StreamID] = append(instances[ev.StreamID], instanceID)
 					mu.Unlock()
 				},
 			}
@@ -763,16 +763,16 @@ func TestHandlerFactory_StreamCoherenceWithFactory(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	for entity, ids := range instances {
+	for stream, ids := range instances {
 		if len(ids) == 0 {
-			t.Errorf("entity %s: no events handled", entity)
+			t.Errorf("stream %s: no events handled", stream)
 			continue
 		}
 		first := ids[0]
 		for _, id := range ids {
 			if id != first {
-				t.Errorf("entity %s: events handled by instances %v, want all the same",
-					entity, ids)
+				t.Errorf("stream %s: events handled by instances %v, want all the same",
+					stream, ids)
 				break
 			}
 		}
@@ -783,9 +783,9 @@ func TestHandlerFactory_WorkerContextMatchesWorker(t *testing.T) {
 	// Every event routed to a given worker must be handled by the instance
 	// whose factory-time WorkerContext.ID equals that worker's index. This
 	// is the round-trip proof that the worker ID passed to the factory is
-	// the same one that pickWorker() would assign for the entity.
-	entities := pickDistinctEntities(t, 3, 3)
-	events := newEventsByEntities([]int64{1, 2, 3}, entities)
+	// the same one that pickWorker() would assign for the stream.
+	streams := pickDistinctStreams(t, 3, 3)
+	events := newEventsByStreams([]int64{1, 2, 3}, streams)
 	var (
 		instancesMu sync.Mutex
 		instances   = make(map[int]*workerContextRecordingHandler)
@@ -817,15 +817,15 @@ func TestHandlerFactory_WorkerContextMatchesWorker(t *testing.T) {
 		wantWorker := pickWorker(ev, 3)
 		recording := instances[wantWorker]
 		if recording == nil {
-			t.Errorf("entity %s: no instance for worker %d", ev.EntityID, wantWorker)
+			t.Errorf("stream %s: no instance for worker %d", ev.StreamID, wantWorker)
 			continue
 		}
 		recording.mu.Lock()
-		got := recording.seen[ev.EntityID]
+		got := recording.seen[ev.StreamID]
 		recording.mu.Unlock()
 		if got != wantWorker {
-			t.Errorf("entity %s: routed to worker %d but handler came from worker %d",
-				ev.EntityID, wantWorker, got)
+			t.Errorf("stream %s: routed to worker %d but handler came from worker %d",
+				ev.StreamID, wantWorker, got)
 		}
 	}
 }
@@ -892,7 +892,7 @@ func TestHandlerFactory_WorkerContextInSequentialMode(t *testing.T) {
 }
 
 // workerContextRecordingHandler is keyed on its factory-time workerID and
-// records the (entity -> workerID) mapping for assertions in
+// records the (stream -> workerID) mapping for assertions in
 // TestHandlerFactory_WorkerContextMatchesWorker.
 type workerContextRecordingHandler struct {
 	workerID int
@@ -907,7 +907,7 @@ func (w *workerContextRecordingHandler) Handle(_ context.Context, ev StoredEvent
 	if w.seen == nil {
 		w.seen = make(map[uuid.UUID]int)
 	}
-	w.seen[ev.EntityID] = w.workerID
+	w.seen[ev.StreamID] = w.workerID
 	w.mu.Unlock()
 	return nil
 }

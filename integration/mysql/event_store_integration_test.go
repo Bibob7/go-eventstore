@@ -44,12 +44,12 @@ func ensureOutboxTable(t *testing.T, db *sql.DB) {
 	stmt := `CREATE TABLE IF NOT EXISTS outbox (
         id INT NOT NULL AUTO_INCREMENT,
         event_id BINARY(16) NOT NULL,
-        aggregate_id BINARY(16) NOT NULL,
+        stream_id BINARY(16) NOT NULL,
         event_type VARCHAR(255) NOT NULL,
         payload JSON NOT NULL,
         occurred_at DATETIME NOT NULL,
         PRIMARY KEY (id),
-        KEY aggregate_id_idx (aggregate_id),
+        KEY stream_id_idx (stream_id),
         KEY event_type_idx (event_type),
         KEY event_id_idx (event_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;`
@@ -100,7 +100,7 @@ func insertEvent(t *testing.T, exec interface {
 	occurredAt := time.Now().Format(time.DateTime)
 
 	// Explicitly set id to craft gaps
-	stmt := fmt.Sprintf("INSERT INTO %s (id, event_id, aggregate_id, event_type, payload, occurred_at) VALUES (?, ?, ?, ?, ?, ?)", outboxTable)
+	stmt := fmt.Sprintf("INSERT INTO %s (id, event_id, stream_id, event_type, payload, occurred_at) VALUES (?, ?, ?, ?, ?, ?)", outboxTable)
 	_, err := exec.ExecContext(context.Background(), stmt, id, mustBinary(evtID), mustBinary(aggID), eventType, payload, occurredAt)
 	require.NoError(t, err)
 }
@@ -248,10 +248,10 @@ func TestEventStore_GapDetection_WithConcurrentTransactions(t *testing.T) {
 	defer func() { _ = tx1.Rollback() }()
 
 	firstEvent := &testEvent{
-		EventID:     mustUUID(t),
-		AggregateId: mustUUID(t),
-		Payload:     "first",
-		OccurredOn:  time.Now(),
+		EventID:    mustUUID(t),
+		StreamId:   mustUUID(t),
+		Payload:    "first",
+		OccurredOn: time.Now(),
 	}
 	require.NoError(t, store.Append(WithTx(ctx, tx1), firstEvent))
 
@@ -260,10 +260,10 @@ func TestEventStore_GapDetection_WithConcurrentTransactions(t *testing.T) {
 	defer func() { _ = tx2.Rollback() }()
 
 	secondEvent := &testEvent{
-		EventID:     mustUUID(t),
-		AggregateId: mustUUID(t),
-		Payload:     "second",
-		OccurredOn:  time.Now(),
+		EventID:    mustUUID(t),
+		StreamId:   mustUUID(t),
+		Payload:    "second",
+		OccurredOn: time.Now(),
 	}
 	require.NoError(t, store.Append(WithTx(ctx, tx2), secondEvent))
 	require.NoError(t, tx2.Commit())
@@ -284,16 +284,16 @@ func TestEventStore_GapDetection_WithConcurrentTransactions(t *testing.T) {
 
 // testEvent is a minimal DomainEvent implementation for round-trip tests.
 type testEvent struct {
-	EventID     uuid.UUID `json:"event_id"`
-	AggregateId uuid.UUID `json:"aggregate_id"`
-	Payload     string    `json:"payload"`
-	OccurredOn  time.Time `json:"occurred_on"`
+	EventID    uuid.UUID `json:"event_id"`
+	StreamId   uuid.UUID `json:"stream_id"`
+	Payload    string    `json:"payload"`
+	OccurredOn time.Time `json:"occurred_on"`
 }
 
-func (e *testEvent) ID() uuid.UUID          { return e.EventID }
-func (e *testEvent) AggregateID() uuid.UUID { return e.AggregateId }
-func (e *testEvent) EventType() string      { return "test.event" }
-func (e *testEvent) OccurredAt() time.Time  { return e.OccurredOn }
+func (e *testEvent) ID() uuid.UUID         { return e.EventID }
+func (e *testEvent) StreamID() uuid.UUID   { return e.StreamId }
+func (e *testEvent) EventType() string     { return "test.event" }
+func (e *testEvent) OccurredAt() time.Time { return e.OccurredOn }
 
 func mustUUID(t *testing.T) uuid.UUID {
 	t.Helper()
@@ -303,7 +303,7 @@ func mustUUID(t *testing.T) uuid.UUID {
 }
 
 // TestEventStore_AppendFetchRoundTrip verifies that Append followed by
-// FetchBatchOfEventsSince preserves all fields, including the aggregate ID
+// FetchBatchOfEventsSince preserves all fields, including the stream ID
 // (which historically was scanned as a string and silently turned into
 // uuid.Nil) and OccurredAt (which must be timezone-stable).
 func TestEventStore_AppendFetchRoundTrip(t *testing.T) {
@@ -326,14 +326,14 @@ func TestEventStore_AppendFetchRoundTrip(t *testing.T) {
 
 			eventID, err := uuid.NewV4()
 			require.NoError(t, err)
-			aggregateID, err := uuid.NewV4()
+			streamID, err := uuid.NewV4()
 			require.NoError(t, err)
 
 			evt := &testEvent{
-				EventID:     eventID,
-				AggregateId: aggregateID,
-				Payload:     "hello",
-				OccurredOn:  tc.occurred,
+				EventID:    eventID,
+				StreamId:   streamID,
+				Payload:    "hello",
+				OccurredOn: tc.occurred,
 			}
 
 			store := NewEventStore(db, outboxTable)
@@ -347,8 +347,8 @@ func TestEventStore_AppendFetchRoundTrip(t *testing.T) {
 
 			got := events[0]
 			require.Equal(t, eventID, got.ID, "event ID must round-trip")
-			require.Equal(t, aggregateID, got.EntityID, "aggregate ID must round-trip (not uuid.Nil)")
-			require.NotEqual(t, uuid.Nil, got.EntityID, "aggregate ID must not be zero UUID")
+			require.Equal(t, streamID, got.StreamID, "stream ID must round-trip (not uuid.Nil)")
+			require.NotEqual(t, uuid.Nil, got.StreamID, "stream ID must not be zero UUID")
 			require.Equal(t, "test.event", got.EventType)
 			require.True(t, got.OccurredAt.Equal(tc.occurred),
 				"occurred_at must be equal regardless of timezone: got %s, want %s",

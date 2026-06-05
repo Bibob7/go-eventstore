@@ -36,7 +36,7 @@ func (m *mockTransientStore) CleanUpEvents(_ context.Context, events []StoredEve
 
 func newStoredEvent(incrementID int64) StoredEvent {
 	id, _ := uuid.NewV4()
-	return StoredEvent{ID: id, EntityID: id, IncrementID: incrementID, EventType: "test-event", OccurredAt: time.Now()}
+	return StoredEvent{ID: id, StreamID: id, IncrementID: incrementID, EventType: "test-event", OccurredAt: time.Now()}
 }
 
 func TestTransientRelay_Name(t *testing.T) {
