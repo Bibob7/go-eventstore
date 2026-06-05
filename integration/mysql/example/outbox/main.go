@@ -130,7 +130,7 @@ func run() error {
 func printEvents(label string, events []eventstore.StoredEvent) {
 	fmt.Printf("  [%s] fetched %d event(s)\n", label, len(events))
 	for _, event := range events {
-		fmt.Printf("    increment_id=%d type=%s aggregate_id=%s\n",
-			event.IncrementID, event.EventType, event.EntityID)
+		fmt.Printf("    increment_id=%d type=%s stream_id=%s\n",
+			event.IncrementID, event.EventType, event.StreamID)
 	}
 }

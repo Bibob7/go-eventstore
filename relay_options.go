@@ -30,15 +30,15 @@ func WithConditionalBatchDelay(d time.Duration) RelayOption {
 }
 
 // WithParallelism runs the relay across n worker goroutines partitioned by
-// the event's EntityID (fnv32a(EntityID) % n). All events of a given
-// aggregate are processed sequentially on the same worker, preserving
+// the event's StreamID (fnv32a(StreamID) % n). All events of a given
+// stream are processed sequentially on the same worker, preserving
 // stream ordering. n must be >= 1; values < 1 are clamped to 1.
 //
 // On a BatchHandler relay, the factory produces one BatchHandler per
 // worker and Commit fires once per worker per batch. On a plain-Handler
 // relay, the factory produces one Handler per worker; the relay is strict
 // all-or-nothing in the parallel path regardless of strategy (the
-// per-EntityID partitioning makes partial per-worker progress unsafe
+// per-StreamID partitioning makes partial per-worker progress unsafe
 // to merge into a single cursor update).
 func WithParallelism(n int) RelayOption {
 	return func(c *relayConfig) {

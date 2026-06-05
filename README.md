@@ -37,13 +37,13 @@ cfg := mysqlstore.Config{
 ```go
 type OrderPlaced struct {
     id          uuid.UUID
-    aggregateID uuid.UUID
+    streamID uuid.UUID
     occurredAt  time.Time
     OrderID     string
 }
 
 func (e OrderPlaced) ID() uuid.UUID          { return e.id }
-func (e OrderPlaced) AggregateID() uuid.UUID { return e.aggregateID }
+func (e OrderPlaced) StreamID() uuid.UUID { return e.streamID }
 func (e OrderPlaced) EventType() string      { return "OrderPlaced" }
 func (e OrderPlaced) OccurredAt() time.Time  { return e.occurredAt }
 ```
@@ -55,7 +55,7 @@ store := mysqlstore.NewEventStore(db, "outbox")
 
 err := store.Append(ctx, OrderPlaced{
     id:          uuid.Must(uuid.NewV4()),
-    aggregateID: orderID,
+    streamID: orderID,
     occurredAt:  time.Now(),
     OrderID:     "ord-123",
 })
@@ -136,11 +136,11 @@ relay := eventstore.NewTransientHandlerRelay(
 | `WithBatchSize(n)` | Max events fetched per `Run` (default `DefaultBatchSize`). |
 | `WithBatchDelay(d)` | Unconditional delay between batches. |
 | `WithConditionalBatchDelay(d)` | Delay applied only when a handler returns `ErrEventNotReadyToProcess`. |
-| `WithParallelism(n)` | Run handler calls across `n` worker goroutines partitioned by `EntityID` (default `1`). See [Parallel relay](#parallel-relay-worker-pool) below. |
+| `WithParallelism(n)` | Run handler calls across `n` worker goroutines partitioned by `StreamID` (default `1`). See [Parallel relay](#parallel-relay-worker-pool) below. |
 
 ## Parallel relay (worker pool)
 
-For high-throughput outbox relays, `WithParallelism(n)` shards each batch across `n` worker goroutines. Events are routed to workers by hashing the event's `EntityID` with `fnv32a`, so all events of a given aggregate are processed sequentially on the same worker — preserving per-stream ordering while running different aggregates in parallel.
+For high-throughput outbox relays, `WithParallelism(n)` shards each batch across `n` worker goroutines. Events are routed to workers by hashing the event's `StreamID` with `fnv32a`, so all events of a given stream are processed sequentially on the same worker — preserving per-stream ordering while running different streams in parallel.
 
 ### Per-worker state: the factory
 
@@ -203,9 +203,9 @@ The types below are the building blocks of the library. For the broader patterns
 
 ### Events
 
-**DomainEvent** — the write model you implement and pass to `Store.Append`. It is a [domain event](https://martinfowler.com/eaaDev/DomainEvent.html): it exposes the event's `ID`, `AggregateID`, `EventType`, and `OccurredAt`; how the payload is serialized is up to the `Store` implementation.
+**DomainEvent** — the write model you implement and pass to `Store.Append`. It is a [domain event](https://martinfowler.com/eaaDev/DomainEvent.html): it exposes the event's `ID`, `StreamID`, `EventType`, and `OccurredAt`; how the payload is serialized is up to the `Store` implementation.
 
-**StoredEvent** — the read model delivered to handlers. It carries the database-assigned `IncrementID` (the relay's cursor position), the `EntityID` (used to partition events across parallel workers), the serialized `Payload`, and the same `EventType` / `OccurredAt` metadata.
+**StoredEvent** — the read model delivered to handlers. It carries the database-assigned `IncrementID` (the relay's cursor position), the `StreamID` (used to partition events across parallel workers), the serialized `Payload`, and the same `EventType` / `OccurredAt` metadata.
 
 ### Stores
 

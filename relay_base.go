@@ -19,15 +19,15 @@ type relayConfig struct {
 	parallelism           int
 }
 
-// pickWorker hashes the event's EntityID to a stable worker index. The same
-// EntityID always lands on the same worker for a given n, so per-aggregate
+// pickWorker hashes the event's StreamID to a stable worker index. The same
+// StreamID always lands on the same worker for a given n, so per-stream
 // ordering is preserved across batches.
 func pickWorker(ev StoredEvent, n int) int {
 	if n <= 1 {
 		return 0
 	}
 	h := fnv.New32a()
-	id := ev.EntityID
+	id := ev.StreamID
 	_, _ = h.Write(id[:])
 	return int(h.Sum32() % uint32(n))
 }
@@ -76,7 +76,7 @@ type parallelWorkerArgs struct {
 }
 
 // runParallel orchestrates the worker pool: spawn one goroutine per
-// worker, dispatch each event by hash(EntityID), and wait for all workers
+// worker, dispatch each event by hash(StreamID), and wait for all workers
 // to drain. The startWorker closure is supplied by the concrete relay
 // type — it knows how to invoke the registered factories and the
 // per-event logic. The waitGroup is also created here so callers can
@@ -137,7 +137,7 @@ func runParallel(
 	}
 	wg.Wait()
 
-	// Strict in the parallel path: per-EntityID partitioning means partial
+	// Strict in the parallel path: per-StreamID partitioning means partial
 	// per-worker progress can't be merged into a single cursor update
 	// without risking lost events. Any error — a cancelled dispatch or a
 	// handler/Commit failure — discards the whole batch so the next Run

@@ -27,21 +27,21 @@ import (
 // benchDomainEvent is a minimal DomainEvent used to seed the relay pipelines.
 type benchDomainEvent struct {
 	id        uuid.UUID
-	entityID  uuid.UUID
+	streamID  uuid.UUID
 	eventType string
 	occurred  time.Time
 }
 
-func (e *benchDomainEvent) ID() uuid.UUID          { return e.id }
-func (e *benchDomainEvent) AggregateID() uuid.UUID { return e.entityID }
-func (e *benchDomainEvent) EventType() string      { return e.eventType }
-func (e *benchDomainEvent) OccurredAt() time.Time  { return e.occurred }
+func (e *benchDomainEvent) ID() uuid.UUID         { return e.id }
+func (e *benchDomainEvent) StreamID() uuid.UUID   { return e.streamID }
+func (e *benchDomainEvent) EventType() string     { return e.eventType }
+func (e *benchDomainEvent) OccurredAt() time.Time { return e.occurred }
 
 func newBenchEvent(id int64) DomainEvent {
 	uid, _ := uuid.NewV4()
 	return &benchDomainEvent{
 		id:        uid,
-		entityID:  uid,
+		streamID:  uid,
 		eventType: "bench-event",
 		occurred:  time.Now(),
 	}
@@ -69,7 +69,7 @@ func (s *benchTransientStore) Append(_ context.Context, events ...DomainEvent) e
 		s.events = append(s.events, StoredEvent{
 			IncrementID: s.nextID,
 			ID:          be.id,
-			EntityID:    be.entityID,
+			StreamID:    be.streamID,
 			EventType:   be.eventType,
 			Payload:     `{"bench":true}`,
 			OccurredAt:  be.occurred,
@@ -133,7 +133,7 @@ func (s *benchPointerStore) Append(_ context.Context, events ...DomainEvent) err
 		s.events = append(s.events, StoredEvent{
 			IncrementID: int64(len(s.events)) + 1,
 			ID:          be.id,
-			EntityID:    be.entityID,
+			StreamID:    be.streamID,
 			EventType:   be.eventType,
 			Payload:     `{"bench":true}`,
 			OccurredAt:  be.occurred,
@@ -243,7 +243,7 @@ func BenchmarkTransientRelay(b *testing.B) {
 						store.events = append(store.events, StoredEvent{
 							IncrementID: store.nextID,
 							ID:          uid,
-							EntityID:    uid,
+							StreamID:    uid,
 							EventType:   "bench-event",
 							Payload:     `{"bench":true}`,
 							OccurredAt:  time.Now(),

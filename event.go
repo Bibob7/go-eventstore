@@ -12,8 +12,8 @@ import (
 type DomainEvent interface {
 	// ID returns the unique identifier of this event.
 	ID() uuid.UUID
-	// AggregateID returns the identifier of the aggregate that produced this event.
-	AggregateID() uuid.UUID
+	// StreamID returns the identifier of the stream this event belongs to.
+	StreamID() uuid.UUID
 	// EventType returns a stable string identifier for the event type (e.g. "OrderPlaced").
 	EventType() string
 	// OccurredAt returns the wall-clock time at which the event occurred.
@@ -28,8 +28,8 @@ type StoredEvent struct {
 	IncrementID int64
 	// ID is the unique identifier of the event.
 	ID uuid.UUID
-	// EntityID is the identifier of the aggregate that produced the event.
-	EntityID uuid.UUID
+	// StreamID is the identifier of the stream this event belongs to.
+	StreamID uuid.UUID
 	// EventType is the stable string identifier for the event type.
 	EventType string
 	// Payload contains the serialized event data (typically JSON).

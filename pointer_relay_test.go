@@ -96,7 +96,7 @@ func newEvents(incrementIDs ...int64) []StoredEvent {
 	events := make([]StoredEvent, len(incrementIDs))
 	for i, id := range incrementIDs {
 		uid, _ := uuid.NewV4()
-		events[i] = StoredEvent{ID: uid, EntityID: uid, IncrementID: id, EventType: "test-event", OccurredAt: time.Now()}
+		events[i] = StoredEvent{ID: uid, StreamID: uid, IncrementID: id, EventType: "test-event", OccurredAt: time.Now()}
 	}
 	return events
 }
