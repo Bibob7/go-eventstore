@@ -21,7 +21,7 @@ type transientRelay struct {
 // wraps the relay in the configured delay decorators. It is shared by the
 // plain-Handler and BatchHandler constructors.
 func newTransientRelay(name string, store TransientStore, strategy batchStrategy, opts ...RelayOption) Relay {
-	cfg := &relayConfig{batchSize: DefaultBatchSize, parallelism: 1}
+	cfg := &relayConfig{batchSize: DefaultBatchSize, parallelism: 1, partitionStrategy: DefaultPartitionStrategy}
 	for _, opt := range opts {
 		opt(cfg)
 	}
@@ -102,7 +102,7 @@ func (t *transientRelay) Run(ctx context.Context) (err error) {
 	if t.parallelism <= 1 {
 		_, processed, err = t.strategy.runSequential(ctx, events)
 	} else {
-		_, processed, err = runParallel(ctx, events, t.parallelism, t.strategy.runWorker)
+		_, processed, err = runParallel(ctx, events, t.parallelism, t.partitionStrategy, t.strategy.runWorker)
 	}
 	return err
 }

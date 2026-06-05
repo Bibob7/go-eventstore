@@ -39,7 +39,7 @@ type pointerRelay struct {
 // wraps the relay in the configured delay decorators. It is shared by the
 // plain-Handler and BatchHandler constructors.
 func newPointerRelay(name string, store PointerStore, incrementIDStore IncrementIDStore, strategy batchStrategy, opts ...RelayOption) Relay {
-	cfg := &relayConfig{batchSize: DefaultBatchSize, parallelism: 1}
+	cfg := &relayConfig{batchSize: DefaultBatchSize, parallelism: 1, partitionStrategy: DefaultPartitionStrategy}
 	for _, opt := range opts {
 		opt(cfg)
 	}
@@ -78,7 +78,7 @@ func newPointerRelay(name string, store PointerStore, incrementIDStore Increment
 // (parallelism <= 1). If a Handle call fails mid-batch, the cursor
 // advances up to the last successfully processed event so the next Run
 // resumes from there. In the parallel path (parallelism > 1) the relay
-// is strict all-or-nothing because the per-StreamID partitioning makes
+// is strict all-or-nothing because the per-event partitioning makes
 // per-worker partial progress unsafe to merge into a single cursor
 // update.
 //
@@ -148,7 +148,7 @@ func (p *pointerRelay) Run(ctx context.Context) (err error) {
 	if p.parallelism <= 1 {
 		newLastIncrementID, _, err = p.strategy.runSequential(ctx, storedEvents)
 	} else {
-		newLastIncrementID, _, err = runParallel(ctx, storedEvents, p.parallelism, p.strategy.runWorker)
+		newLastIncrementID, _, err = runParallel(ctx, storedEvents, p.parallelism, p.partitionStrategy, p.strategy.runWorker)
 	}
 	if newLastIncrementID > 0 {
 		processed = true

@@ -2,7 +2,6 @@ package eventstore
 
 import (
 	"context"
-	"hash/fnv"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -18,19 +17,7 @@ type relayConfig struct {
 	batchDelay            time.Duration
 	conditionalBatchDelay time.Duration
 	parallelism           int
-}
-
-// pickWorker hashes the event's StreamID to a stable worker index. The same
-// StreamID always lands on the same worker for a given n, so per-stream
-// ordering is preserved across batches.
-func pickWorker(ev StoredEvent, n int) int {
-	if n <= 1 {
-		return 0
-	}
-	h := fnv.New32a()
-	id := ev.StreamID
-	_, _ = h.Write(id[:])
-	return int(h.Sum32() % uint32(n))
+	partitionStrategy     PartitionStrategy
 }
 
 // buildPlainHandler invokes the Handler factory for the given worker.
@@ -53,11 +40,12 @@ func buildBatchHandler(factory func(WorkerContext) BatchHandler, wc WorkerContex
 	return factory(wc)
 }
 
-// runParallel partitions the batch into n per-worker buckets by
-// hash(StreamID) and runs one goroutine per non-empty worker via errgroup.
-// Partitioning up front (rather than streaming events into per-worker
-// channels) keeps each StreamID on a stable worker, so per-stream ordering is
-// preserved within a worker. The runWorker closure is supplied by the concrete
+// runParallel partitions the batch into n per-worker buckets using partitioner
+// and runs one goroutine per non-empty worker via errgroup. Partitioning
+// up front (rather than streaming events into per-worker channels) keeps
+// each event on a stable worker for the lifetime of a Run, so any
+// per-event ordering invariant the partitioner enforces is preserved
+// within a worker. The runWorker closure is supplied by the concrete
 // relay type — it knows how to invoke the registered factories and the
 // per-event logic.
 //
@@ -66,7 +54,7 @@ func buildBatchHandler(factory func(WorkerContext) BatchHandler, wc WorkerContex
 // derived context is cancelled on that first error so the remaining workers
 // can bail out between events.
 //
-// Strict in the parallel path: per-StreamID partitioning means partial
+// Strict in the parallel path: per-event partitioning means partial
 // per-worker progress can't be merged into a single cursor update without
 // risking lost events. Any error — a cancelled context or a handler/Commit
 // failure — discards the whole batch so the next Run retries it from the last
@@ -75,6 +63,7 @@ func runParallel(
 	ctx context.Context,
 	batch []StoredEvent,
 	n int,
+	partitioner PartitionStrategy,
 	runWorker func(ctx context.Context, wc WorkerContext, events []StoredEvent) error,
 ) (int64, []StoredEvent, error) {
 	// Nothing to process: return before indexing batch[len(batch)-1] below.
@@ -84,8 +73,11 @@ func runParallel(
 	}
 
 	workers := make([][]StoredEvent, n)
+	if partitioner == nil {
+		partitioner = DefaultPartitionStrategy
+	}
 	for _, ev := range batch {
-		i := pickWorker(ev, n)
+		i := partitioner.Partition(ev, n)
 		workers[i] = append(workers[i], ev)
 	}
 

@@ -33,8 +33,8 @@ func BenchmarkParallelPointerRelay(b *testing.B) {
 			incStore := newBenchIncrementIDStore()
 
 			// Seed 100 distinct streams with 200 events each, in a
-			// round-robin pattern so pickWorker distributes them across
-			// all available workers.
+			// round-robin pattern so the default PartitionStrategy
+			// distributes them across all available workers.
 			streamIDs := make([]uuid.UUID, 100)
 			for i := range streamIDs {
 				streamIDs[i] = uuid.Must(uuid.NewV4())
