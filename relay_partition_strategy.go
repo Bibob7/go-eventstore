@@ -3,9 +3,10 @@ package eventstore
 import "hash/fnv"
 
 // PartitionStrategy decides which worker index a given event is routed
-// to when the relay runs in parallel. The same event must always map to
-// the same worker index for a given workerCount, so per-event ordering
-// is preserved across batches.
+// to when the relay runs in parallel. When ordering matters for a group
+// of related events (for example, all events of one stream), the
+// strategy should consistently route that group to the same worker for a
+// given workerCount so that ordering is preserved.
 //
 // Implementations must be safe for concurrent use; runParallel invokes
 // Partition from a single goroutine but a relay may run many Runs in

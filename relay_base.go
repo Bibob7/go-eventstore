@@ -71,6 +71,9 @@ func runParallel(
 	if len(batch) == 0 {
 		return 0, nil, nil
 	}
+	if partitioner == nil {
+		partitioner = DefaultPartitionStrategy
+	}
 
 	workers := make([][]StoredEvent, n)
 	for _, ev := range batch {

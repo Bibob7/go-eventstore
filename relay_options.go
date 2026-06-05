@@ -55,8 +55,9 @@ func WithParallelism(n int) RelayOption {
 // workers in the parallel path. The default (DefaultPartitionStrategy)
 // hashes StreamID with fnv32a; a custom strategy can implement
 // round-robin, key extraction, or any other partitioning scheme —
-// provided the same event always maps to the same worker index for a
-// given workerCount, so per-event ordering invariants survive a Run.
+// when ordering matters for related events (for example, events from the
+// same stream), the strategy should consistently route those related
+// events to the same worker for a given workerCount.
 //
 // Passing nil falls back to DefaultPartitionStrategy so the option is
 // always safe to apply.
