@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Bibob7/go-eventstore"
-	"github.com/Bibob7/go-eventstore/filter"
 )
 
 const eventStoreTable = "event_store"
@@ -391,7 +390,7 @@ func TestEventStore_HasUncommittedCalledOnceForLargeGap(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	filtered, err := filter.NewUntilGapEventFilter(0, det).Execute(ctx, input)
+	filtered, err := eventstore.NewUntilGapEventFilter(0, det).Execute(ctx, input)
 	require.NoError(t, err)
 	require.Equal(t, []int64{1, 2, 10}, fetchIDs(filtered))
 	require.Equal(t, 1, det.calls, "HasUncommittedID should be called exactly once for the large gap")
