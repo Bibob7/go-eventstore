@@ -51,7 +51,7 @@ func run() error {
 	}
 
 	bundle := mysqlstore.NewEventStoreBundle(db, mysqlstore.Config{
-		EventStoreTableName:  "outbox",
+		EventStoreTableName:  "event_store",
 		IncrementIDTableName: "event_increment_id",
 	})
 

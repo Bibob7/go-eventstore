@@ -1,6 +1,6 @@
--- Outbox table: stores domain events before they are relayed to handlers.
+-- Event store table: stores domain events before they are relayed to handlers.
 -- The table name is configurable via Config.EventStoreTableName.
-CREATE TABLE IF NOT EXISTS outbox (
+CREATE TABLE IF NOT EXISTS event_store (
     id            INT            NOT NULL AUTO_INCREMENT,
     event_id      BINARY(16)     NOT NULL,
     stream_id     BINARY(16)     NOT NULL,

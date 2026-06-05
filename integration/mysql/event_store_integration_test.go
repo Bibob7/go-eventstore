@@ -16,7 +16,7 @@ import (
 	"github.com/Bibob7/go-eventstore/filter"
 )
 
-const outboxTable = "outbox"
+const eventStoreTable = "event_store"
 
 func getenvDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
@@ -34,14 +34,14 @@ func testDSN() string {
 	return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", user, pass, host, port, database)
 }
 
-// ensureOutboxTable makes sure the outbox table exists with the expected schema (compatible with our EventStore)
-func ensureOutboxTable(t *testing.T, db *sql.DB) {
+// ensureEventStoreTable makes sure the event store table exists with the expected schema (compatible with our EventStore)
+func ensureEventStoreTable(t *testing.T, db *sql.DB) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Create table if not exists. Schema mirrored from db/wedding/migrations/000008_add_outbox_table.up.sql
-	stmt := `CREATE TABLE IF NOT EXISTS outbox (
+	// Create table if not exists. Schema mirrored from sql/mysql/schema.sql
+	stmt := `CREATE TABLE IF NOT EXISTS event_store (
         id INT NOT NULL AUTO_INCREMENT,
         event_id BINARY(16) NOT NULL,
         stream_id BINARY(16) NOT NULL,
@@ -58,7 +58,7 @@ func ensureOutboxTable(t *testing.T, db *sql.DB) {
 	require.NoError(t, err)
 
 	// Clean slate for each test run
-	_, err = db.ExecContext(ctx, "TRUNCATE TABLE "+outboxTable)
+	_, err = db.ExecContext(ctx, "TRUNCATE TABLE "+eventStoreTable)
 	require.NoError(t, err)
 }
 
@@ -100,7 +100,7 @@ func insertEvent(t *testing.T, exec interface {
 	occurredAt := time.Now().Format(time.DateTime)
 
 	// Explicitly set id to craft gaps
-	stmt := fmt.Sprintf("INSERT INTO %s (id, event_id, stream_id, event_type, payload, occurred_at) VALUES (?, ?, ?, ?, ?, ?)", outboxTable)
+	stmt := fmt.Sprintf("INSERT INTO %s (id, event_id, stream_id, event_type, payload, occurred_at) VALUES (?, ?, ?, ?, ?, ?)", eventStoreTable)
 	_, err := exec.ExecContext(context.Background(), stmt, id, mustBinary(evtID), mustBinary(streamID), eventType, payload, occurredAt)
 	require.NoError(t, err)
 }
@@ -177,7 +177,7 @@ func TestEventStore_FetchBatchOfEventsSince(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			db := openTestDB(t)
 			defer func() { _ = db.Close() }()
-			ensureOutboxTable(t, db)
+			ensureEventStoreTable(t, db)
 
 			for _, id := range tc.committed {
 				insertEvent(t, db, id, "test")
@@ -192,7 +192,7 @@ func TestEventStore_FetchBatchOfEventsSince(t *testing.T) {
 				}
 			}
 
-			store := NewEventStore(db, outboxTable)
+			store := NewEventStore(db, eventStoreTable)
 			events, err := store.FetchBatchOfEventsSince(context.Background(), tc.since, tc.limit)
 			require.NoError(t, err)
 			require.Equal(t, tc.wantIDs, fetchIDs(events))
@@ -206,7 +206,7 @@ func TestEventStore_FetchBatchOfEventsSince(t *testing.T) {
 func TestEventStore_GapDetection_RepeatableAttemptAfterCommit(t *testing.T) {
 	db := openTestDB(t)
 	defer func() { _ = db.Close() }()
-	ensureOutboxTable(t, db)
+	ensureEventStoreTable(t, db)
 
 	insertEvent(t, db, 1, "test")
 	insertEvent(t, db, 2, "test")
@@ -218,7 +218,7 @@ func TestEventStore_GapDetection_RepeatableAttemptAfterCommit(t *testing.T) {
 		insertEvent(t, tx, id, "test")
 	}
 
-	store := NewEventStore(db, outboxTable)
+	store := NewEventStore(db, eventStoreTable)
 	ctx := context.Background()
 
 	firstEvents, err := store.FetchBatchOfEventsSince(ctx, 0, 10)
@@ -238,9 +238,9 @@ func TestEventStore_GapDetection_RepeatableAttemptAfterCommit(t *testing.T) {
 func TestEventStore_GapDetection_WithConcurrentTransactions(t *testing.T) {
 	db := openTestDB(t)
 	defer func() { _ = db.Close() }()
-	ensureOutboxTable(t, db)
+	ensureEventStoreTable(t, db)
 
-	store := NewEventStore(db, outboxTable)
+	store := NewEventStore(db, eventStoreTable)
 	ctx := context.Background()
 
 	tx1, err := db.BeginTx(ctx, nil)
@@ -322,7 +322,7 @@ func TestEventStore_AppendFetchRoundTrip(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			db := openTestDB(t)
 			defer func() { _ = db.Close() }()
-			ensureOutboxTable(t, db)
+			ensureEventStoreTable(t, db)
 
 			eventID, err := uuid.NewV4()
 			require.NoError(t, err)
@@ -336,7 +336,7 @@ func TestEventStore_AppendFetchRoundTrip(t *testing.T) {
 				OccurredOn: tc.occurred,
 			}
 
-			store := NewEventStore(db, outboxTable)
+			store := NewEventStore(db, eventStoreTable)
 			ctx := context.Background()
 
 			require.NoError(t, store.Append(ctx, evt))
@@ -375,13 +375,13 @@ func (c *countingGapDetector) HasUncommittedID(ctx context.Context, low, high in
 func TestEventStore_HasUncommittedCalledOnceForLargeGap(t *testing.T) {
 	db := openTestDB(t)
 	defer func() { _ = db.Close() }()
-	ensureOutboxTable(t, db)
+	ensureEventStoreTable(t, db)
 
 	insertEvent(t, db, 1, "test")
 	insertEvent(t, db, 2, "test")
 	insertEvent(t, db, 10, "test")
 
-	store := NewEventStore(db, outboxTable)
+	store := NewEventStore(db, eventStoreTable)
 	det := &countingGapDetector{store: store}
 
 	input := []eventstore.StoredEvent{
@@ -449,13 +449,13 @@ func TestEventStore_CleanUpToIncluding(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			db := openTestDB(t)
 			defer func() { _ = db.Close() }()
-			ensureOutboxTable(t, db)
+			ensureEventStoreTable(t, db)
 
 			for _, id := range tc.seed {
 				insertEvent(t, db, id, "test")
 			}
 
-			store := NewEventStore(db, outboxTable)
+			store := NewEventStore(db, eventStoreTable)
 			require.NoError(t, store.CleanUpToIncluding(context.Background(), tc.threshold))
 
 			remaining, err := store.FetchBatchOfEventsSince(context.Background(), -1, 100)

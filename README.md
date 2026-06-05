@@ -44,7 +44,7 @@ Apply the DDL from [`integration/mysql/sql/mysql/schema.sql`](integration/mysql/
 
 ```go
 cfg := mysqlstore.Config{
-    EventStoreTableName:  "outbox",
+    EventStoreTableName:  "event_store",
     IncrementIDTableName: "event_increment_id",
 }
 ```
@@ -70,7 +70,7 @@ func (e OrderPlaced) OccurredAt() time.Time { return e.occurredAt }
 ### 2. Append events
 
 ```go
-store := mysqlstore.NewEventStore(db, "outbox")
+store := mysqlstore.NewEventStore(db, "event_store")
 
 err := store.Append(ctx, OrderPlaced{
     id:         uuid.Must(uuid.NewV4()),
@@ -99,7 +99,7 @@ A `PointerRelay` tracks the last successfully processed `IncrementID` per relay 
 
 ```go
 bundle := mysqlstore.NewEventStoreBundle(db, mysqlstore.Config{
-    EventStoreTableName:  "outbox",
+    EventStoreTableName:  "event_store",
     IncrementIDTableName: "event_increment_id",
 })
 
