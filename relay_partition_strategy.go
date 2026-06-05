@@ -2,6 +2,12 @@ package eventstore
 
 import "hash/fnv"
 
+// DefaultPartitionStrategy is the PartitionStrategy used by a relay
+// when no WithPartitionStrategy option is supplied. It preserves the
+// historical hash-based partitioning so existing deployments see no
+// behavior change.
+var DefaultPartitionStrategy PartitionStrategy = HashStreamIDPartitionStrategy{}
+
 // PartitionStrategy decides which worker index a given event is routed
 // to when the relay runs in parallel.
 //
@@ -38,9 +44,3 @@ func (HashStreamIDPartitionStrategy) Partition(ev StoredEvent, workerCount int) 
 	_, _ = h.Write(id[:])
 	return int(h.Sum32() % uint32(workerCount))
 }
-
-// DefaultPartitionStrategy is the PartitionStrategy used by a relay
-// when no WithPartitionStrategy option is supplied. It preserves the
-// historical hash-based partitioning so existing deployments see no
-// behaviour change.
-var DefaultPartitionStrategy PartitionStrategy = HashStreamIDPartitionStrategy{}
