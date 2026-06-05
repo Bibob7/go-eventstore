@@ -166,12 +166,12 @@ func TestProcessBatch_CommitOncePerWorker(t *testing.T) {
 
 	var events []StoredEvent
 	var ids []int64
-	var entIDs []uuid.UUID
+	var streamIDs []uuid.UUID
 	for i, e := range streams {
 		ids = append(ids, int64(i+1))
-		entIDs = append(entIDs, e)
+		streamIDs = append(streamIDs, e)
 	}
-	events = newEventsByStreams(ids, entIDs)
+	events = newEventsByStreams(ids, streamIDs)
 
 	h := newMockBatchHandler()
 	relay := NewPointerBatchHandlerRelay(
