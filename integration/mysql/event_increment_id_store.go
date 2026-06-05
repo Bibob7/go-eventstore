@@ -27,23 +27,21 @@ func NewEventIncrementIDStore(db *sql.DB, tableName string) *EventIncrementIDSto
 
 func (s *EventIncrementIDStore) SetIncrementID(ctx context.Context, relayName string, expectedPreviousID int64, incrementID int64) error {
 	return WithTransaction(ctx, s.db, func(tx *sql.Tx) error {
+		// Ensure the row exists before locking it. A SELECT ... FOR UPDATE on a
+		// missing row takes a gap lock, which causes deadlocks when several
+		// relays write their (distinct) cursors concurrently against an empty
+		// table. A plain upsert of distinct keys only takes insert-intention
+		// locks, so the subsequent FOR UPDATE locks an existing record instead.
+		// #nosec G201
+		ensureStmt := fmt.Sprintf("INSERT INTO %s (relay_name, increment_id) VALUES (?, 0) ON DUPLICATE KEY UPDATE relay_name = relay_name", s.tableName)
+		if _, err := tx.ExecContext(ctx, ensureStmt, relayName); err != nil {
+			return err
+		}
+
 		// #nosec G201
 		selectStmt := fmt.Sprintf("SELECT increment_id FROM %s WHERE relay_name = ? FOR UPDATE", s.tableName)
 		var currentID int64
-		err := tx.QueryRowContext(ctx, selectStmt, relayName).Scan(&currentID)
-
-		if errors.Is(err, sql.ErrNoRows) {
-			if expectedPreviousID != 0 {
-				return eventstore.ErrIncrementIDConflict
-			}
-			// #nosec G201
-			insertStmt := fmt.Sprintf("INSERT INTO %s (relay_name, increment_id) VALUES (?, ?)", s.tableName)
-			if _, err = tx.ExecContext(ctx, insertStmt, relayName, incrementID); err != nil {
-				return err
-			}
-			return nil
-		}
-		if err != nil {
+		if err := tx.QueryRowContext(ctx, selectStmt, relayName).Scan(&currentID); err != nil {
 			return err
 		}
 
@@ -54,7 +52,7 @@ func (s *EventIncrementIDStore) SetIncrementID(ctx context.Context, relayName st
 		if currentID != incrementID {
 			// #nosec G201
 			updateStmt := fmt.Sprintf("UPDATE %s SET increment_id = ? WHERE relay_name = ?", s.tableName)
-			if _, err = tx.ExecContext(ctx, updateStmt, incrementID, relayName); err != nil {
+			if _, err := tx.ExecContext(ctx, updateStmt, incrementID, relayName); err != nil {
 				return err
 			}
 		}
