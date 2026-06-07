@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS event_store (
     event_type    VARCHAR(255)   NOT NULL,
     payload       JSON           NOT NULL,
     occurred_at   DATETIME       NOT NULL,
+    metadata      JSON           NULL,
     PRIMARY KEY (id),
     KEY stream_id_idx  (stream_id),
     KEY event_type_idx (event_type),

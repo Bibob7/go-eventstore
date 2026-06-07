@@ -222,9 +222,42 @@ The types below are the building blocks of the library. They combine into an app
 
 ### Events
 
-**DomainEvent** — the write model you implement and pass to `Store.Append`. It is a [domain event](https://martinfowler.com/eaaDev/DomainEvent.html): it exposes the event's `ID`, `StreamID`, `EventType`, and `OccurredAt`; how the payload is serialized is up to the `Store` implementation.
+**DomainEvent** — the write model you implement and pass to `Store.Append`. It is a [domain event](https://martinfowler.com/eaaDev/DomainEvent.html): it exposes the event's `ID`, `StreamID`, `EventType`, and `OccurredAt`; how the payload is serialized is up to the `Store` implementation. Optional cross-cutting metadata is exposed via `Metadata()` — see [Metadata](#metadata).
 
-**StoredEvent** — the read model delivered to handlers. It carries the database-assigned `IncrementID` (the relay's cursor position), the `StreamID` (used to partition events across parallel workers), the serialized `Payload`, and the same `EventType` / `OccurredAt` metadata.
+**StoredEvent** — the read model delivered to handlers. It carries the database-assigned `IncrementID` (the relay's cursor position), the `StreamID` (used to partition events across parallel workers), the serialized `Payload`, the same `EventType` / `OccurredAt` metadata, and the optional `Metadata` map.
+
+#### Metadata
+
+Domain events may carry cross-cutting `Metadata` as a `map[string]string`, attached via the `Metadata()` method. Use it for correlation IDs, causation chains, distributed-tracing IDs, tenancy, or any other key/value you want to propagate alongside an event.
+
+Reserved keys (by convention — the store does not enforce them):
+
+| Key | Purpose |
+|---|---|
+| `correlation_id` | links all events triggered by a single incoming request or command, propagated across service boundaries |
+| `causation_id`   | the ID of the event that *caused* this event — i.e. the last event in the chain this one reacts to |
+| `trace_id`       | OTel/distributed-tracing trace ID, for log correlation |
+
+Custom keys are welcome. `nil` and an empty map are treated as equivalent and persisted as SQL `NULL` (no JSON overhead per row).
+
+For events that have no metadata, embed `eventstore.BaseEvent` to satisfy the `Metadata()` method with `nil`:
+
+```go
+type OrderPlaced struct {
+    eventstore.BaseEvent
+    OrderID string
+}
+```
+
+To attach metadata, override `Metadata()` on the embedding type:
+
+```go
+func (e OrderPlaced) Metadata() eventstore.Metadata {
+    return eventstore.Metadata{
+        eventstore.MetadataKeyCorrelationID: e.correlationID,
+    }
+}
+```
 
 ### Stores
 

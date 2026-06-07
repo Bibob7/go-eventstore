@@ -47,6 +47,7 @@ func ensureEventStoreTable(t *testing.T, db *sql.DB) {
         event_type VARCHAR(255) NOT NULL,
         payload JSON NOT NULL,
         occurred_at DATETIME NOT NULL,
+        metadata JSON NULL,
         PRIMARY KEY (id),
         KEY stream_id_idx (stream_id),
         KEY event_type_idx (event_type),
@@ -282,17 +283,24 @@ func TestEventStore_GapDetection_WithConcurrentTransactions(t *testing.T) {
 }
 
 // testEvent is a minimal DomainEvent implementation for round-trip tests.
+//
+// The metadata field is named `Meta` to avoid a clash with the `Metadata()`
+// method: Go disallows a field and a method with the same name on the same
+// type. The method returns the field as eventstore.Metadata, which is what
+// the DomainEvent interface expects.
 type testEvent struct {
-	EventID    uuid.UUID `json:"event_id"`
-	StreamId   uuid.UUID `json:"stream_id"`
-	Payload    string    `json:"payload"`
-	OccurredOn time.Time `json:"occurred_on"`
+	EventID    uuid.UUID           `json:"event_id"`
+	StreamId   uuid.UUID           `json:"stream_id"`
+	Payload    string              `json:"payload"`
+	OccurredOn time.Time           `json:"occurred_on"`
+	Meta       eventstore.Metadata `json:"metadata,omitempty"`
 }
 
-func (e *testEvent) ID() uuid.UUID         { return e.EventID }
-func (e *testEvent) StreamID() uuid.UUID   { return e.StreamId }
-func (e *testEvent) EventType() string     { return "test.event" }
-func (e *testEvent) OccurredAt() time.Time { return e.OccurredOn }
+func (e *testEvent) ID() uuid.UUID                 { return e.EventID }
+func (e *testEvent) StreamID() uuid.UUID           { return e.StreamId }
+func (e *testEvent) EventType() string             { return "test.event" }
+func (e *testEvent) OccurredAt() time.Time         { return e.OccurredOn }
+func (e *testEvent) Metadata() eventstore.Metadata { return e.Meta }
 
 func mustUUID(t *testing.T) uuid.UUID {
 	t.Helper()
@@ -354,6 +362,134 @@ func TestEventStore_AppendFetchRoundTrip(t *testing.T) {
 				got.OccurredAt, tc.occurred)
 			require.Equal(t, time.UTC, got.OccurredAt.Location(),
 				"occurred_at must be returned in UTC")
+		})
+	}
+}
+
+// TestEventStore_MetadataRoundTrip verifies that Metadata is persisted on
+// Append and recovered on FetchBatchOfEventsSince. Three cases matter:
+//
+//  1. nil metadata is stored as SQL NULL and read back as nil (not an empty
+//     map) — keeps the wire format cheap when no metadata is attached.
+//  2. an empty Metadata is treated equivalently to nil.
+//  3. a populated Metadata round-trips byte-for-byte as a JSON object, so
+//     consumers can rely on the conventional keys (correlation_id,
+//     causation_id, trace_id) and on custom keys alike.
+func TestEventStore_MetadataRoundTrip(t *testing.T) {
+	tests := []struct {
+		name        string
+		metadata    eventstore.Metadata
+		wantNil     bool
+		wantEntries map[string]string
+	}{
+		{
+			name:     "nil metadata round-trips as nil",
+			metadata: nil,
+			wantNil:  true,
+		},
+		{
+			name:     "empty metadata round-trips as nil (no JSON overhead)",
+			metadata: eventstore.Metadata{},
+			wantNil:  true,
+		},
+		{
+			name: "populated metadata round-trips as JSON object",
+			metadata: eventstore.Metadata{
+				eventstore.MetadataKeyCorrelationID: "corr-123",
+				eventstore.MetadataKeyCausationID:   "evt-prev-456",
+				eventstore.MetadataKeyTraceID:       "trace-789",
+			},
+			wantNil: false,
+			wantEntries: map[string]string{
+				eventstore.MetadataKeyCorrelationID: "corr-123",
+				eventstore.MetadataKeyCausationID:   "evt-prev-456",
+				eventstore.MetadataKeyTraceID:       "trace-789",
+			},
+		},
+		{
+			name: "custom (non-reserved) keys round-trip too",
+			metadata: eventstore.Metadata{
+				"tenant_id": "acme",
+				"actor_id":  "user-42",
+			},
+			wantNil: false,
+			wantEntries: map[string]string{
+				"tenant_id": "acme",
+				"actor_id":  "user-42",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			defer func() { _ = db.Close() }()
+			ensureEventStoreTable(t, db)
+
+			eventID := mustUUID(t)
+			streamID := mustUUID(t)
+
+			evt := &testEvent{
+				EventID:    eventID,
+				StreamId:   streamID,
+				Payload:    "hello",
+				OccurredOn: time.Now().UTC(),
+				Meta:       tc.metadata,
+			}
+
+			store := NewEventStore(db, eventStoreTable)
+			ctx := context.Background()
+			require.NoError(t, store.Append(ctx, evt))
+
+			events, err := store.FetchBatchOfEventsSince(ctx, -1, 10)
+			require.NoError(t, err)
+			require.Len(t, events, 1)
+
+			got := events[0].Metadata
+			if tc.wantNil {
+				require.Nil(t, got,
+					"expected nil metadata, got %#v (nil and empty map must be equivalent)", got)
+				return
+			}
+			require.NotNil(t, got, "expected non-nil metadata")
+			require.Equal(t, tc.wantEntries, map[string]string(got))
+		})
+	}
+}
+
+// TestEventStore_MetadataPersistedAsNullColumn verifies directly against the
+// column that nil/empty metadata is stored as SQL NULL, not as an empty JSON
+// object. This protects the perf claim in the Append implementation.
+func TestEventStore_MetadataPersistedAsNullColumn(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata eventstore.Metadata
+	}{
+		{name: "nil metadata", metadata: nil},
+		{name: "empty metadata", metadata: eventstore.Metadata{}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			defer func() { _ = db.Close() }()
+			ensureEventStoreTable(t, db)
+
+			evt := &testEvent{
+				EventID:    mustUUID(t),
+				StreamId:   mustUUID(t),
+				Payload:    "hello",
+				OccurredOn: time.Now().UTC(),
+				Meta:       tc.metadata,
+			}
+
+			store := NewEventStore(db, eventStoreTable)
+			require.NoError(t, store.Append(context.Background(), evt))
+
+			var raw sql.NullString
+			row := db.QueryRow("SELECT metadata FROM " + eventStoreTable + " ORDER BY id DESC LIMIT 1")
+			require.NoError(t, row.Scan(&raw))
+			require.False(t, raw.Valid, "metadata column must be SQL NULL for nil/empty input")
 		})
 	}
 }

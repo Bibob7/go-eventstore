@@ -30,12 +30,14 @@ type benchDomainEvent struct {
 	streamID  uuid.UUID
 	eventType string
 	occurred  time.Time
+	metadata  Metadata
 }
 
 func (e *benchDomainEvent) ID() uuid.UUID         { return e.id }
 func (e *benchDomainEvent) StreamID() uuid.UUID   { return e.streamID }
 func (e *benchDomainEvent) EventType() string     { return e.eventType }
 func (e *benchDomainEvent) OccurredAt() time.Time { return e.occurred }
+func (e *benchDomainEvent) Metadata() Metadata    { return e.metadata }
 
 func newBenchEvent(id int64) DomainEvent {
 	uid, _ := uuid.NewV4()
@@ -137,6 +139,7 @@ func (s *benchPointerStore) Append(_ context.Context, events ...DomainEvent) err
 			EventType:   be.eventType,
 			Payload:     `{"bench":true}`,
 			OccurredAt:  be.occurred,
+			Metadata:    be.metadata,
 		})
 	}
 	return nil

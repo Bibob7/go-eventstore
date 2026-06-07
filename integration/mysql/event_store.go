@@ -34,7 +34,7 @@ func NewEventStore(db *sql.DB, tableName string) *EventStore {
 // It converts events to their corresponding database representation and executes an SQL insert statement.
 // Returns an error if event marshaling fails or the execution of the SQL insert statement is unsuccessful.
 func (s *EventStore) Append(ctx context.Context, domainEvents ...eventstore.DomainEvent) error {
-	argsNum := 5
+	argsNum := 6
 	if len(domainEvents) == 0 {
 		return nil
 	}
@@ -52,7 +52,7 @@ func (s *EventStore) Append(ctx context.Context, domainEvents ...eventstore.Doma
 			eventPayloadJsonString = string(eventPayload)
 		}
 
-		valuesStrings[i] = "(?, ?, ?, ?, ?)"
+		valuesStrings[i] = "(?, ?, ?, ?, ?, ?)"
 		j := i * argsNum
 		binaryId, err := domainEvent.ID().MarshalBinary()
 		if err != nil {
@@ -71,10 +71,21 @@ func (s *EventStore) Append(ctx context.Context, domainEvents ...eventstore.Doma
 		// Always persist in UTC so reads are timezone-stable, independent of
 		// the producer's local timezone or driver configuration.
 		valuesArgs[j+4] = domainEvent.OccurredAt().UTC().Format(time.DateTime)
+		// Metadata: nil and empty maps both map to SQL NULL so we don't pay
+		// for a JSON round-trip on every row when no metadata is attached.
+		if md := domainEvent.Metadata(); len(md) > 0 {
+			mdJSON, err := json.Marshal(map[string]string(md))
+			if err != nil {
+				return err
+			}
+			valuesArgs[j+5] = string(mdJSON)
+		} else {
+			valuesArgs[j+5] = nil
+		}
 	}
 
 	// #nosec G201 -- tableName is validated in the constructor.
-	sqlStmt := fmt.Sprintf("INSERT INTO %s (event_id, stream_id, event_type, payload, occurred_at) VALUES %s", s.tableName, strings.Join(valuesStrings, ","))
+	sqlStmt := fmt.Sprintf("INSERT INTO %s (event_id, stream_id, event_type, payload, occurred_at, metadata) VALUES %s", s.tableName, strings.Join(valuesStrings, ","))
 
 	if tx, exists := GetTx(ctx); exists {
 		slog.Debug("Appending domainEvents to DomainEvent eventStore in transaction")
@@ -105,7 +116,7 @@ func (s *EventStore) FetchBatchOfEventsSince(ctx context.Context, lastIncrementI
 func (s *EventStore) fetchBatchOfEvents(ctx context.Context, lastIncrementID int64, limit int) ([]eventstore.StoredEvent, error) {
 	// #nosec G201 -- tableName is validated in the constructor.
 	selectStmt := fmt.Sprintf(
-		"SELECT id, event_id, stream_id, event_type, payload, occurred_at FROM %s",
+		"SELECT id, event_id, stream_id, event_type, payload, occurred_at, metadata FROM %s",
 		s.tableName)
 	queryArgs := []interface{}{limit}
 	if lastIncrementID >= 0 {
@@ -195,8 +206,9 @@ func (s *EventStore) transformToStoredEvents(rows *sql.Rows) ([]eventstore.Store
 			eventPayload string
 			eventType    string
 			occurredAt   string
+			metadataJSON sql.NullString
 		)
-		err := rows.Scan(&id, &eventID, &streamID, &eventType, &eventPayload, &occurredAt)
+		err := rows.Scan(&id, &eventID, &streamID, &eventType, &eventPayload, &occurredAt, &metadataJSON)
 		if err != nil {
 			return nil, err
 		}
@@ -218,6 +230,13 @@ func (s *EventStore) transformToStoredEvents(rows *sql.Rows) ([]eventstore.Store
 			return nil, err
 		}
 
+		var metadata eventstore.Metadata
+		if metadataJSON.Valid && metadataJSON.String != "" {
+			if err := json.Unmarshal([]byte(metadataJSON.String), &metadata); err != nil {
+				return nil, err
+			}
+		}
+
 		events = append(events, eventstore.StoredEvent{
 			IncrementID: id,
 			ID:          uuidEventID,
@@ -225,6 +244,7 @@ func (s *EventStore) transformToStoredEvents(rows *sql.Rows) ([]eventstore.Store
 			EventType:   eventType,
 			Payload:     eventPayload,
 			OccurredAt:  occurredOnTime,
+			Metadata:    metadata,
 		})
 	}
 	return events, nil
