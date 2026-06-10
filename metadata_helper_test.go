@@ -55,7 +55,10 @@ func TestBaseEvent_DefaultsToNilMetadata(t *testing.T) {
 			ev := tc.fn()
 			// Compile-time check: the constructed value is a DomainEvent.
 			var _ DomainEvent = ev
-			assert.Nil(t, ev.Metadata(),
+			// BaseEvent opts the embedding type into MetadataProvider.
+			mp, ok := ev.(MetadataProvider)
+			assert.True(t, ok, "BaseEvent must satisfy MetadataProvider")
+			assert.Nil(t, mp.Metadata(),
 				"BaseEvent must report nil metadata by default")
 		})
 	}

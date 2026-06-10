@@ -215,7 +215,11 @@ func (s *EventStore) insertEvents(ctx context.Context, tx *sql.Tx, domainEvents 
 		valuesArgs[j+5] = domainEvent.OccurredAt().UTC().Format(time.DateTime)
 		// Metadata: nil and empty maps both map to SQL NULL so we don't pay
 		// for a JSON round-trip on every row when no metadata is attached.
-		if md := domainEvent.Metadata(); len(md) > 0 {
+		var md eventstore.Metadata
+		if mp, ok := domainEvent.(eventstore.MetadataProvider); ok {
+			md = mp.Metadata()
+		}
+		if len(md) > 0 {
 			mdJSON, err := json.Marshal(map[string]string(md))
 			if err != nil {
 				return err

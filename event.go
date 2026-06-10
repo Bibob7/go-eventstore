@@ -52,6 +52,14 @@ type DomainEvent interface {
 	EventType() string
 	// OccurredAt returns the wall-clock time at which the event occurred.
 	OccurredAt() time.Time
+}
+
+// MetadataProvider is an optional interface that DomainEvent implementations
+// can satisfy to attach cross-cutting metadata to an event. The store checks
+// for this interface at append time via a type assertion; events that do not
+// implement it are persisted with nil metadata. This keeps the core
+// DomainEvent interface stable across library versions.
+type MetadataProvider interface {
 	// Metadata returns optional cross-cutting metadata for this event.
 	// Implementations should return nil when no metadata is attached; stores
 	// MUST treat nil and an empty map as equivalent.
