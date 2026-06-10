@@ -1,15 +1,16 @@
 package eventstore
 
-// BaseEvent is a tiny embeddable helper that satisfies the Metadata() method
-// of DomainEvent with a default of nil. Embed it in your domain events when
-// you do not need custom metadata behavior:
+// BaseEvent is a tiny embeddable helper that supplies a default
+// implementation for the helper method of DomainEvent. Embed it in your
+// domain events when you do not need custom Metadata behavior:
 //
 //	type OrderPlaced struct {
 //	    eventstore.BaseEvent
 //	    OrderID string
 //	}
 //
-// To carry metadata, override the method on the embedding type:
+// To override the default, define the method on the embedding type
+// and Go's method-set rules will pick yours up:
 //
 //	func (e OrderPlaced) Metadata() eventstore.Metadata {
 //	    return eventstore.Metadata{

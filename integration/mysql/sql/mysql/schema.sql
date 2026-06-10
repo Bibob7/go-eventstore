@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS event_store (
     id            INT            NOT NULL AUTO_INCREMENT,
     event_id      BINARY(16)     NOT NULL,
     stream_id     BINARY(16)     NOT NULL,
+    stream_version INT           NOT NULL DEFAULT 0,
     event_type    VARCHAR(255)   NOT NULL,
     payload       JSON           NOT NULL,
     occurred_at   DATETIME       NOT NULL,
@@ -11,7 +12,8 @@ CREATE TABLE IF NOT EXISTS event_store (
     PRIMARY KEY (id),
     KEY stream_id_idx  (stream_id),
     KEY event_type_idx (event_type),
-    KEY event_id_idx   (event_id)
+    KEY event_id_idx   (event_id),
+    KEY stream_version_idx (stream_id, stream_version)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- Increment ID table: persists the last processed event ID per relay.

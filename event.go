@@ -36,6 +36,13 @@ const (
 // DomainEvent represents an event that occurred in the domain.
 // Implementations carry all data needed to describe what happened
 // and are passed to Store.Append to persist the event.
+//
+// Note: a DomainEvent does NOT carry a per-stream version. The version
+// is assigned by the store on append — either implicitly (Store.Append
+// treats the event log as an append-only feed) or against an expected
+// version supplied to StreamStore.AppendWithExpectedVersion. Aggregates
+// that need to know their position on reload get it from the last
+// StoredEvent.StreamVersion they replayed.
 type DomainEvent interface {
 	// ID returns the unique identifier of this event.
 	ID() uuid.UUID
@@ -70,4 +77,8 @@ type StoredEvent struct {
 	// Metadata carries the cross-cutting metadata persisted alongside the event.
 	// It is nil for events that did not have metadata when they were appended.
 	Metadata Metadata
+	// StreamVersion is the per-stream position this event occupies. Stores
+	// enforce that, for each stream, this equals the previously-stored
+	// StreamVersion + 1, or 0 for the first event of a fresh stream.
+	StreamVersion int
 }

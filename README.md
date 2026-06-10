@@ -222,9 +222,11 @@ The types below are the building blocks of the library. They combine into an app
 
 ### Events
 
-**DomainEvent** — the write model you implement and pass to `Store.Append`. It is a [domain event](https://martinfowler.com/eaaDev/DomainEvent.html): it exposes the event's `ID`, `StreamID`, `EventType`, and `OccurredAt`; how the payload is serialized is up to the `Store` implementation. Optional cross-cutting metadata is exposed via `Metadata()` — see [Metadata](#metadata).
+**DomainEvent** — the write model you implement and pass to a store's append method. It is a [domain event](https://martinfowler.com/eaaDev/DomainEvent.html): it exposes the event's `ID`, `StreamID`, `EventType`, and `OccurredAt`; how the payload is serialized is up to the `Store` implementation. Optional cross-cutting metadata is exposed via `Metadata()` — see [Metadata](#metadata).
 
-**StoredEvent** — the read model delivered to handlers. It carries the database-assigned `IncrementID` (the relay's cursor position), the `StreamID` (used to partition events across parallel workers), the serialized `Payload`, the same `EventType` / `OccurredAt` metadata, and the optional `Metadata` map.
+The event does **not** carry its position in the stream; per-stream versioning is enforced by `StreamStore.AppendWithExpectedVersion`, which takes the expected position as a separate argument. Aggregates that reload from history get the position from the last `StoredEvent.StreamVersion` they replayed.
+
+**StoredEvent** — the read model delivered to handlers. It carries the database-assigned `IncrementID` (the relay's cursor position), the `StreamID` (used to partition events across parallel workers), the serialized `Payload`, the same `EventType` / `OccurredAt` metadata, the optional `Metadata` map, and the per-stream `StreamVersion` that aggregates use to reconstruct themselves.
 
 #### Metadata
 
@@ -259,9 +261,30 @@ func (e OrderPlaced) Metadata() eventstore.Metadata {
 }
 ```
 
+#### Stream versioning
+
+Streams are versioned per `(stream_id, stream_version)`. The version is *assigned by the store*, not carried on the event — this matches the [EventStoreDB `expectedVersion`](https://docs.kurrent.io/clients/tcp/dotnet/21.2/appending.md) and [Axon `expectedVersion`](https://docs.axoniq.io) pattern. Use `StreamStore.AppendWithExpectedVersion` to append events with an optimistic-concurrency check:
+
+```go
+err := store.AppendWithExpectedVersion(ctx, orderID, -1, evt)
+//                                                    ↑
+//                                "stream must currently be empty"
+// On success the event is persisted at stream_version 0, 1, 2, … in batch order.
+```
+
+`expectedVersion == -1` means the stream must be empty (the create path); `expectedVersion == N` means the stream's current head must be exactly `N` (the case after replaying `N+1` events during Load).
+
+The check and the insert run in the same transaction, so two writers loading the same stream cannot both append version `5` — the loser sees `ErrStreamVersionConflict` and reloads. The event's own payload never carries a version field, so there is no way for a caller to "forget" the version: it is the parameter that travels with the append.
+
+A `DomainEvent` does not know its position. To reconstruct an aggregate, use `StreamReader.ReadStream(streamID, fromVersion, limit)` and track the last `StoredEvent.StreamVersion` you replayed — that is the `expectedVersion` you pass to the next `AppendWithExpectedVersion`. The inklusiv `fromVersion` semantics let you resume a rebuild from a snapshot's `version + 1` without an off-by-one dance.
+
+For the plain outbox / projection use case (no aggregates, no per-stream ordering), use the simpler `Store.Append` path. It just inserts events in the order received and does not enforce per-stream ordering — the right tool for relays that just need durable, ordered event delivery.
+
 ### Stores
 
-**Store** — the minimal write interface: `Append(ctx, ...DomainEvent)`. Every backend implements at least this.
+**Store** — the minimal write interface: `Append(ctx, ...DomainEvent)`. Every backend implements at least this. This is the plain append-only-log path: events are inserted in the order received and no per-stream ordering is enforced. The right tool for outbox / projection workloads that don't model aggregates.
+
+**StreamStore** — write interface for per-stream appends with optimistic concurrency control: `AppendWithExpectedVersion(ctx, streamID, expectedVersion, ...DomainEvent)`. The store atomically verifies that the stream's current head equals `expectedVersion` (or `-1` for "stream must be empty") and assigns the new events consecutive stream versions starting at `expectedVersion + 1`. The right tool for the event-sourced aggregate pattern (Load → Decide → Save).
 
 **PointerStore** — cursor-based reads: `FetchBatchOfEventsSince(lastIncrementID, limit)` returns events ordered by ascending `IncrementID`. Backs the pointer relays. The MySQL implementation applies gap detection so events are not delivered out of order while concurrent transactions are still in flight.
 
@@ -270,6 +293,10 @@ func (e OrderPlaced) Metadata() eventstore.Metadata {
 **IncrementIDStore** — persists the last successfully processed `IncrementID` per relay (keyed by relay name), enabling resumption after restarts. `SetIncrementID` takes an expected previous value so implementations can enforce [optimistic concurrency control](https://en.wikipedia.org/wiki/Optimistic_concurrency_control) (see `ErrIncrementIDConflict`).
 
 **CleanUpToStore** — bulk outbox cleanup: `CleanUpToIncluding(incrementID)` removes every event at or below a position in one call. Useful when a relay has acknowledged a cursor and everything up to it can be discarded.
+
+**StreamReader** — stream-scoped reads: `ReadStream(streamID, fromVersion, limit)` returns events for a single stream ordered by ascending `StreamVersion`, starting at `fromVersion` *inclusive* (so `fromVersion=0` returns the first event of the stream). Use it to reconstruct aggregates or to drive per-stream projections.
+
+**StreamVersionReader** — cheap pre-check: `LatestStreamVersion(streamID)` returns the highest `StreamVersion` for a stream (or `-1` if the stream is empty) without loading any events. Use it to compute `expectedVersion` when you have not just loaded the stream (e.g. snapshot-resume, one-shot appenders), or for monitoring / diagnostics. Implementations are independent of `StreamReader` — declare a dependency on the one you actually need.
 
 ### Processing
 
@@ -287,6 +314,8 @@ func (e OrderPlaced) Metadata() eventstore.Metadata {
 
 **ErrIncrementIDConflict** — returned by an `IncrementIDStore` when the stored position changed between read and write, so a concurrent relay can detect it lost the optimistic-locking race.
 
+**ErrStreamVersionConflict** — returned by `StreamStore.AppendWithExpectedVersion` when the stream's current head does not match `expectedVersion`. `errors.As` against `*eventstore.StreamVersionConflictError` exposes the conflicting `StreamID`, `EventID`, and the `Expected` vs. `Got` positions. Aggregates use this to reload and retry.
+
 **ErrNilFactory** — returned from `Run` when a relay was constructed with a nil handler factory.
 
 ## Examples
@@ -297,11 +326,12 @@ Runnable examples live under [`integration/mysql/example`](integration/mysql/exa
 # from integration/mysql
 docker compose up --wait
 
-go run ./example/append/          # Appending events with and without a transaction
-go run ./example/outbox/          # Transactional outbox pattern (write + relay in one tx)
-go run ./example/gap_detection/   # Two interleaved gaps: relay resumes in order, drops nothing
-go run ./example/pointer_relay/   # PointerRelay with cursor-based position tracking
-go run ./example/transient_relay/ # TransientRelay that deletes events after processing
+go run ./example/append/              # Appending events with and without a transaction
+go run ./example/outbox/              # Transactional outbox pattern (write + relay in one tx)
+go run ./example/gap_detection/       # Two interleaved gaps: relay resumes in order, drops nothing
+go run ./example/pointer_relay/       # PointerRelay with cursor-based position tracking
+go run ./example/transient_relay/     # TransientRelay that deletes events after processing
+go run ./example/repository_aggregate # Event-sourced aggregate: Load → Decide → Save, conflict retry
 ```
 
 ## Running integration tests

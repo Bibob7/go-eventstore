@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gofrs/uuid/v5"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Bibob7/go-eventstore"
@@ -44,6 +46,7 @@ func ensureEventStoreTable(t *testing.T, db *sql.DB) {
         id INT NOT NULL AUTO_INCREMENT,
         event_id BINARY(16) NOT NULL,
         stream_id BINARY(16) NOT NULL,
+        stream_version INT NOT NULL DEFAULT 0,
         event_type VARCHAR(255) NOT NULL,
         payload JSON NOT NULL,
         occurred_at DATETIME NOT NULL,
@@ -51,7 +54,8 @@ func ensureEventStoreTable(t *testing.T, db *sql.DB) {
         PRIMARY KEY (id),
         KEY stream_id_idx (stream_id),
         KEY event_type_idx (event_type),
-        KEY event_id_idx (event_id)
+        KEY event_id_idx (event_id),
+        KEY stream_version_idx (stream_id, stream_version)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;`
 
 	_, err := db.ExecContext(ctx, stmt)
@@ -598,4 +602,407 @@ func TestEventStore_CleanUpToIncluding(t *testing.T) {
 			require.Equal(t, tc.wantIDs, fetchIDs(remaining))
 		})
 	}
+}
+
+// newTestEvent returns a testEvent pinned to the given stream. The caller
+// supplies the payload; the helper assembles the rest so each test row
+// stays focused on what differs.
+func newTestEvent(t *testing.T, streamID uuid.UUID, payload string) *testEvent {
+	t.Helper()
+	return &testEvent{
+		EventID:    mustUUID(t),
+		StreamId:   streamID,
+		Payload:    payload,
+		OccurredOn: time.Now().UTC(),
+	}
+}
+
+// TestEventStore_AppendWithExpectedVersion_AcceptsContiguousSequence is
+// the happy-path integration test: appending three events to a fresh
+// stream with expectedVersion = -1 (then 0, 1) persists all of them with
+// consecutive stream versions 0, 1, 2.
+func TestEventStore_AppendWithExpectedVersion_AcceptsContiguousSequence(t *testing.T) {
+	db := openTestDB(t)
+	defer func() { _ = db.Close() }()
+	ensureEventStoreTable(t, db)
+
+	streamID := mustUUID(t)
+	store := NewEventStore(db, eventStoreTable)
+	ctx := context.Background()
+
+	// expectedVersion = -1 means "stream must be empty". After this, the
+	// stream's head is at version 0.
+	require.NoError(t, store.AppendWithExpectedVersion(ctx, streamID, -1,
+		newTestEvent(t, streamID, "first"),
+		newTestEvent(t, streamID, "second"),
+		newTestEvent(t, streamID, "third"),
+	))
+
+	rows, err := store.ReadStream(ctx, streamID, 0, 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 3)
+	require.Equal(t, []int{0, 1, 2}, []int{
+		rows[0].StreamVersion, rows[1].StreamVersion, rows[2].StreamVersion,
+	})
+}
+
+// TestEventStore_AppendWithExpectedVersion_RejectsConflicts is the
+// table-driven conflict suite. Each row seeds a stream, then attempts a
+// second AppendWithExpectedVersion with a wrong expectedVersion and
+// expects an *eventstore.StreamVersionConflictError whose diagnostics
+// (StreamID, Expected, Got) match the row.
+func TestEventStore_AppendWithExpectedVersion_RejectsConflicts(t *testing.T) {
+	tests := []struct {
+		name         string
+		seedCount    int // how many events to seed on the stream (versions 0..seedCount-1)
+		expectedAt   int // expectedVersion passed to the second call
+		wantExpected int // expected current head reported in the conflict
+		wantGot      int // actual current head reported in the conflict
+	}{
+		{
+			name:         "expectedVersion 0 against a stream with two events (head = 1)",
+			seedCount:    2,
+			expectedAt:   0,
+			wantExpected: 0,
+			wantGot:      1,
+		},
+		{
+			name:         "expectedVersion 5 against a stream with two events (head = 1)",
+			seedCount:    2,
+			expectedAt:   5,
+			wantExpected: 5,
+			wantGot:      1,
+		},
+		{
+			name:         "expectedVersion -1 (empty) against a non-empty stream",
+			seedCount:    1,
+			expectedAt:   -1,
+			wantExpected: -1,
+			wantGot:      0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			defer func() { _ = db.Close() }()
+			ensureEventStoreTable(t, db)
+
+			streamID := mustUUID(t)
+			store := NewEventStore(db, eventStoreTable)
+			ctx := context.Background()
+
+			if tc.seedCount > 0 {
+				seed := make([]eventstore.DomainEvent, tc.seedCount)
+				for i := 0; i < tc.seedCount; i++ {
+					seed[i] = newTestEvent(t, streamID, "seed")
+				}
+				require.NoError(t, store.AppendWithExpectedVersion(ctx, streamID, -1, seed...))
+			}
+
+			evt := newTestEvent(t, streamID, "offender")
+			err := store.AppendWithExpectedVersion(ctx, streamID, tc.expectedAt, evt)
+			require.Error(t, err, "expected a conflict error")
+
+			var conflict *eventstore.StreamVersionConflictError
+			require.ErrorAs(t, err, &conflict,
+				"AppendWithExpectedVersion must return a *StreamVersionConflictError, got %T: %v", err, err)
+			assert.Equal(t, streamID, conflict.StreamID)
+			assert.Equal(t, tc.wantExpected, conflict.Expected)
+			assert.Equal(t, tc.wantGot, conflict.Got)
+			assert.True(t, errors.Is(err, eventstore.ErrStreamVersionConflict))
+		})
+	}
+}
+
+// TestEventStore_AppendWithExpectedVersion_RejectsForeignStreamEvent
+// verifies that an event whose StreamID() does not match the streamID
+// parameter is reported as a *StreamVersionConflictError, not silently
+// inserted. This is the per-batch single-stream invariant: a StreamStore
+// is the gatekeeper for one stream, and a mixed batch is a bug.
+func TestEventStore_AppendWithExpectedVersion_RejectsForeignStreamEvent(t *testing.T) {
+	db := openTestDB(t)
+	defer func() { _ = db.Close() }()
+	ensureEventStoreTable(t, db)
+
+	streamA := mustUUID(t)
+	streamB := mustUUID(t)
+	store := NewEventStore(db, eventStoreTable)
+	ctx := context.Background()
+
+	evtA := newTestEvent(t, streamA, "for-a")
+	evtB := newTestEvent(t, streamB, "actually-for-b")
+	err := store.AppendWithExpectedVersion(ctx, streamA, -1, evtA, evtB)
+	require.Error(t, err)
+	var conflict *eventstore.StreamVersionConflictError
+	require.ErrorAs(t, err, &conflict)
+	assert.Equal(t, streamA, conflict.StreamID)
+	assert.Equal(t, evtB.ID(), conflict.EventID)
+	// Got is set to -1 to signal "wrong stream for this batch".
+	assert.Equal(t, -1, conflict.Got)
+}
+
+// TestEventStore_AppendWithExpectedVersion_StreamsAreIndependent
+// verifies that events on stream A do not affect the version counter of
+// stream B — i.e. a successful append to A followed by a successful append
+// to B works in either order, and a conflict on A does not roll back the
+// state of B. Because each AppendWithExpectedVersion owns its own
+// transaction, "rollback" is per-call, not cross-stream.
+func TestEventStore_AppendWithExpectedVersion_StreamsAreIndependent(t *testing.T) {
+	db := openTestDB(t)
+	defer func() { _ = db.Close() }()
+	ensureEventStoreTable(t, db)
+
+	streamA := mustUUID(t)
+	streamB := mustUUID(t)
+	store := NewEventStore(db, eventStoreTable)
+	ctx := context.Background()
+
+	// streamA gets versions 0, 1.
+	require.NoError(t, store.AppendWithExpectedVersion(ctx, streamA, -1,
+		newTestEvent(t, streamA, "a0"),
+		newTestEvent(t, streamA, "a1"),
+	))
+	// streamB starts empty and gets version 0.
+	require.NoError(t, store.AppendWithExpectedVersion(ctx, streamB, -1,
+		newTestEvent(t, streamB, "b0"),
+	))
+
+	aEvents, err := store.ReadStream(ctx, streamA, 0, 10)
+	require.NoError(t, err)
+	require.Len(t, aEvents, 2)
+	bEvents, err := store.ReadStream(ctx, streamB, 0, 10)
+	require.NoError(t, err)
+	require.Len(t, bEvents, 1)
+
+	// A stale-version attempt on streamA must fail and report A's head.
+	err = store.AppendWithExpectedVersion(ctx, streamA, 0, // stale: head is 1
+		newTestEvent(t, streamA, "a-stale"))
+	require.Error(t, err)
+	var conflict *eventstore.StreamVersionConflictError
+	require.ErrorAs(t, err, &conflict)
+	assert.Equal(t, streamA, conflict.StreamID)
+	assert.Equal(t, 0, conflict.Expected)
+	assert.Equal(t, 1, conflict.Got)
+
+	// streamB is unaffected.
+	require.NoError(t, store.AppendWithExpectedVersion(ctx, streamB, 0,
+		newTestEvent(t, streamB, "b1")))
+	bEvents, err = store.ReadStream(ctx, streamB, 0, 10)
+	require.NoError(t, err)
+	require.Len(t, bEvents, 2)
+	assert.Equal(t, 0, bEvents[0].StreamVersion)
+	assert.Equal(t, 1, bEvents[1].StreamVersion)
+}
+
+// TestEventStore_ReadStream_FromVersionInclusive verifies the inklusiv
+// semantics: ReadStream(streamID, fromVersion, limit) includes the event
+// at fromVersion itself.
+func TestEventStore_ReadStream_FromVersionInclusive(t *testing.T) {
+	db := openTestDB(t)
+	defer func() { _ = db.Close() }()
+	ensureEventStoreTable(t, db)
+
+	streamID := mustUUID(t)
+	store := NewEventStore(db, eventStoreTable)
+	ctx := context.Background()
+
+	require.NoError(t, store.AppendWithExpectedVersion(ctx, streamID, -1,
+		newTestEvent(t, streamID, "v0"),
+		newTestEvent(t, streamID, "v1"),
+		newTestEvent(t, streamID, "v2"),
+		newTestEvent(t, streamID, "v3"),
+	))
+
+	tests := []struct {
+		name        string
+		fromVersion int
+		limit       int
+		wantCount   int
+		wantFirst   int
+		wantLast    int
+	}{
+		{name: "from 0 returns the entire stream", fromVersion: 0, limit: 10, wantCount: 4, wantFirst: 0, wantLast: 3},
+		{name: "from 2 returns the tail", fromVersion: 2, limit: 10, wantCount: 2, wantFirst: 2, wantLast: 3},
+		{name: "from 1 with limit 1 returns only v1", fromVersion: 1, limit: 1, wantCount: 1, wantFirst: 1, wantLast: 1},
+		{name: "from past the end returns empty", fromVersion: 99, limit: 10, wantCount: 0},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := store.ReadStream(ctx, streamID, tc.fromVersion, tc.limit)
+			require.NoError(t, err)
+			require.Len(t, got, tc.wantCount)
+			if tc.wantCount > 0 {
+				assert.Equal(t, tc.wantFirst, got[0].StreamVersion,
+					"first event version must equal fromVersion (inklusiv)")
+				assert.Equal(t, tc.wantLast, got[len(got)-1].StreamVersion)
+			}
+		})
+	}
+}
+
+// TestEventStore_ReadStream_OtherStreamUnaffected verifies that ReadStream
+// never returns events of other streams, even when a higher stream_version
+// exists in the table.
+func TestEventStore_ReadStream_OtherStreamUnaffected(t *testing.T) {
+	db := openTestDB(t)
+	defer func() { _ = db.Close() }()
+	ensureEventStoreTable(t, db)
+
+	store := NewEventStore(db, eventStoreTable)
+	ctx := context.Background()
+
+	streamA := mustUUID(t)
+	streamB := mustUUID(t)
+	require.NoError(t, store.AppendWithExpectedVersion(ctx, streamA, -1,
+		newTestEvent(t, streamA, "a0"),
+		newTestEvent(t, streamA, "a1"),
+	))
+	require.NoError(t, store.AppendWithExpectedVersion(ctx, streamB, -1,
+		newTestEvent(t, streamB, "b0"),
+	))
+
+	got, err := store.ReadStream(ctx, streamA, 0, 100)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	for _, e := range got {
+		assert.Equal(t, streamA, e.StreamID)
+	}
+}
+
+// TestEventStore_Append_PlainAppendOnly verifies that Store.Append (the
+// plain append-only-log path, no per-stream ordering enforced) just
+// inserts events regardless of their StreamID. It is the right path for
+// outbox / projection workloads that don't model aggregates.
+func TestEventStore_Append_PlainAppendOnly(t *testing.T) {
+	db := openTestDB(t)
+	defer func() { _ = db.Close() }()
+	ensureEventStoreTable(t, db)
+
+	store := NewEventStore(db, eventStoreTable)
+	ctx := context.Background()
+
+	streamA := mustUUID(t)
+	streamB := mustUUID(t)
+	// Mixed-stream batch: Store.Append has no opinion on StreamID.
+	require.NoError(t, store.Append(ctx,
+		newTestEvent(t, streamA, "a0"),
+		newTestEvent(t, streamB, "b0"),
+		newTestEvent(t, streamA, "a1"),
+	))
+
+	rows, err := store.ReadStream(ctx, streamA, 0, 100)
+	require.NoError(t, err)
+	assert.Len(t, rows, 2)
+}
+
+// TestEventStore_LatestStreamVersion verifies that the cheap pre-check
+// returns the highest persisted stream_version for a stream, or -1 for an
+// empty one. The contract is:
+//   - unknown streamID  → -1, nil (caller treats it as a fresh stream)
+//   - single event      →  0
+//   - multiple events   →  max(stream_version)
+//   - other streams' events are ignored even when their versions are higher
+func TestEventStore_LatestStreamVersion(t *testing.T) {
+	tests := []struct {
+		name   string
+		seeded map[string]int // streamID-as-hex → how many events to seed (versions 0..N-1)
+		query  string         // streamID-as-hex to query; "" means "fresh stream"
+		want   int
+	}{
+		{
+			name:   "unknown stream returns -1 sentinel",
+			seeded: nil,
+			query:  "",
+			want:   -1,
+		},
+		{
+			name:   "single event returns 0",
+			seeded: map[string]int{"only": 1},
+			query:  "only",
+			want:   0,
+		},
+		{
+			name:   "multiple events return max, not last-appended",
+			seeded: map[string]int{"s": 5},
+			query:  "s",
+			want:   4,
+		},
+		{
+			name: "other streams with higher versions do not affect this stream",
+			seeded: map[string]int{
+				"a": 2,
+				"b": 6,
+			},
+			query: "a",
+			want:  1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			defer func() { _ = db.Close() }()
+			ensureEventStoreTable(t, db)
+
+			store := NewEventStore(db, eventStoreTable)
+			ctx := context.Background()
+
+			// Resolve hex stream IDs from the table to real UUIDs.
+			ids := make(map[string]uuid.UUID, len(tc.seeded))
+			for hex, n := range tc.seeded {
+				id := mustUUID(t)
+				ids[hex] = id
+				batch := make([]eventstore.DomainEvent, n)
+				for i := 0; i < n; i++ {
+					batch[i] = newTestEvent(t, id, "seed")
+				}
+				require.NoError(t, store.AppendWithExpectedVersion(ctx, id, -1, batch...))
+			}
+
+			var queryID uuid.UUID
+			if tc.query == "" {
+				queryID = mustUUID(t)
+			} else {
+				queryID = ids[tc.query]
+			}
+
+			got, err := store.LatestStreamVersion(ctx, queryID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got,
+				"LatestStreamVersion must return max(stream_version), or -1 for empty streams")
+		})
+	}
+}
+
+// TestEventStore_LatestStreamVersion_WorksOnStoreAppend verifies that
+// LatestStreamVersion is a read-side query that does not depend on which
+// write path produced the events — events inserted via the plain
+// Store.Append path are just as visible as events written via
+// AppendWithExpectedVersion. This locks down the separation between the
+// write paths and the read-side stream view.
+func TestEventStore_LatestStreamVersion_WorksOnStoreAppend(t *testing.T) {
+	db := openTestDB(t)
+	defer func() { _ = db.Close() }()
+	ensureEventStoreTable(t, db)
+
+	store := NewEventStore(db, eventStoreTable)
+	ctx := context.Background()
+
+	streamID := mustUUID(t)
+	require.NoError(t, store.Append(ctx,
+		newTestEvent(t, streamID, "a"),
+		newTestEvent(t, streamID, "b"),
+		newTestEvent(t, streamID, "c"),
+	))
+
+	got, err := store.LatestStreamVersion(ctx, streamID)
+	require.NoError(t, err)
+	// Three rows, but Store.Append writes them with stream_version = 0
+	// (the append-only path does not enforce per-stream ordering). The
+	// MAX is therefore 0, not 2. This is the documented difference
+	// between the two write paths: LatestStreamVersion reports what the
+	// store actually persisted, not what the caller "intended".
+	assert.Equal(t, 0, got)
 }
