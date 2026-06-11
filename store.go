@@ -44,10 +44,10 @@ type StreamStore interface {
 	//     are then persisted at versions N+1, N+2, …. This is the case
 	//     after replaying N+1 events during Load.
 	//
-	// All events in the batch MUST have StreamID() == streamID; otherwise
-	// the call returns a *StreamVersionConflictError (it is treated as a
-	// concurrency violation because the implicit "all events belong to
-	// this stream" contract was broken).
+	// All events in the batch MUST have StreamID() == streamID, and
+	// expectedVersion MUST be >= -1; otherwise the call returns an error
+	// wrapping ErrInvalidStreamAppend. These are programming errors, not
+	// concurrency conflicts — a reload-and-retry loop must not catch them.
 	//
 	// Concurrency: the check and the insert run inside the same
 	// transaction (caller-supplied or store-owned), so concurrent
@@ -67,6 +67,17 @@ type StreamStore interface {
 // after successful processing. It is intended for work-queue style relays
 // (see NewTransientHandlerRelay / NewTransientBatchHandlerRelay) where
 // each event is delivered exactly once and then deleted from the store.
+//
+// Because processing DELETES events, a TransientStore must not share a
+// table with consumers that expect events to be retained: pointer relays
+// would silently miss the deleted events, and aggregate streams written
+// via StreamStore would lose their history. Use a dedicated table for
+// transient workloads.
+//
+// FetchBatchOfEvents performs no locking, so running multiple instances
+// of the same transient relay against one store (competing consumers)
+// results in duplicate processing. Scale transient relays by partitioning
+// within a single instance (WithParallelism), not by adding instances.
 type TransientStore interface {
 	// FetchBatchOfEvents returns up to limit events starting from the smallest IncrementID.
 	FetchBatchOfEvents(ctx context.Context, limit int) ([]StoredEvent, error)
@@ -87,6 +98,11 @@ type PointerStore interface {
 // in a single call. It is intended for outbox cleanup patterns where, once
 // a relay has acknowledged a position, every event at or
 // before that position can be discarded.
+//
+// Deletion is indiscriminate: when several pointer relays read the same
+// store, the threshold must be the MINIMUM cursor across all of them, and
+// the store must not hold aggregate streams (their history would be
+// deleted along with the outbox rows).
 type CleanUpToStore interface {
 	// CleanUpToIncluding removes all events whose IncrementID is less than
 	// or equal to incrementID. The event with IncrementID == incrementID,
@@ -99,6 +115,11 @@ type CleanUpToStore interface {
 // (a fromVersion of 0 returns the first event of the stream). Streams let
 // you reconstruct an aggregate from its events, or build a per-stream
 // projection that needs the events of a particular entity in order.
+//
+// Only events written via StreamStore.AppendWithExpectedVersion are part
+// of a stream. Events written via the plain Store.Append path carry no
+// StreamVersion and are NOT returned by ReadStream — the two write paths
+// are separate worlds that merely share a table.
 //
 // Implementations are independent of the relay machinery: a Store does not
 // have to also implement StreamReader, and vice versa.
@@ -131,9 +152,11 @@ type StreamReader interface {
 // required to satisfy this interface, and not every backend will.
 type StreamVersionReader interface {
 	// LatestStreamVersion returns the highest StreamVersion persisted for
-	// streamID, or -1 if no events exist for that stream. -1 is the
-	// sentinel for an empty/fresh stream so callers can compute the next
-	// expected version with simple arithmetic:
+	// streamID, or -1 if no versioned events exist for that stream
+	// (unversioned events written via the plain Store.Append path do not
+	// count — see StreamReader). -1 is the sentinel for an empty/fresh
+	// stream so callers can compute the next expected version with simple
+	// arithmetic:
 	//
 	//	expected := last + 1
 	//

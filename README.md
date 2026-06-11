@@ -137,6 +137,8 @@ The relay is built around a *factory*: `func(eventstore.WorkerContext) eventstor
 
 A `TransientRelay` deletes each event from the store after all handlers have processed it successfully. Useful when the outbox should not grow indefinitely and no separate cleanup job is desired.
 
+Because events are deleted, a transient relay must own its table exclusively: other relays (or aggregate streams) on the same table would lose events. `FetchBatchOfEvents` performs no locking, so do not run multiple instances of the same transient relay against one store — scale within a single instance via `WithParallelism(n)` instead.
+
 ```go
 relay := eventstore.NewTransientHandlerRelay(
     "order-relay",
@@ -226,7 +228,7 @@ The types below are the building blocks of the library. They combine into an app
 
 The event does **not** carry its position in the stream; per-stream versioning is enforced by `StreamStore.AppendWithExpectedVersion`, which takes the expected position as a separate argument. Aggregates that reload from history get the position from the last `StoredEvent.StreamVersion` they replayed.
 
-**StoredEvent** — the read model delivered to handlers. It carries the database-assigned `IncrementID` (the relay's cursor position), the `StreamID` (used to partition events across parallel workers), the serialized `Payload`, the same `EventType` / `OccurredAt` metadata, the optional `Metadata` map, and the per-stream `StreamVersion` that aggregates use to reconstruct themselves.
+**StoredEvent** — the read model delivered to handlers. It carries the database-assigned `IncrementID` (the relay's cursor position), the `StreamID` (used to partition events across parallel workers), the serialized `Payload`, the same `EventType` / `OccurredAt` metadata, the optional `Metadata` map, and the per-stream `StreamVersion` that aggregates use to reconstruct themselves (`-1` for unversioned events written via the plain `Store.Append` path).
 
 #### Metadata
 
@@ -274,11 +276,15 @@ err := store.AppendWithExpectedVersion(ctx, orderID, -1, evt)
 
 `expectedVersion == -1` means the stream must be empty (the create path); `expectedVersion == N` means the stream's current head must be exactly `N` (the case after replaying `N+1` events during Load).
 
-The check and the insert run in the same transaction, so two writers loading the same stream cannot both append version `5` — the loser sees `ErrStreamVersionConflict` and reloads. The event's own payload never carries a version field, so there is no way for a caller to "forget" the version: it is the parameter that travels with the append.
+Conflicts are enforced in two layers. A version pre-check runs in the same transaction as the insert and rejects stale `expectedVersion`s. Because that pre-check is a non-locking snapshot read, two concurrent writers can both pass it — the `UNIQUE (stream_id, stream_version)` index then rejects the loser's insert. Either way the loser sees `ErrStreamVersionConflict` and reloads; two writers can never both append version `5`. The event's own payload never carries a version field, so there is no way for a caller to "forget" the version: it is the parameter that travels with the append.
 
-A `DomainEvent` does not know its position. To reconstruct an aggregate, use `StreamReader.ReadStream(streamID, fromVersion, limit)` and track the last `StoredEvent.StreamVersion` you replayed — that is the `expectedVersion` you pass to the next `AppendWithExpectedVersion`. The inklusiv `fromVersion` semantics let you resume a rebuild from a snapshot's `version + 1` without an off-by-one dance.
+A `DomainEvent` does not know its position. To reconstruct an aggregate, use `StreamReader.ReadStream(streamID, fromVersion, limit)` and track the last `StoredEvent.StreamVersion` you replayed — that is the `expectedVersion` you pass to the next `AppendWithExpectedVersion`. The inclusive `fromVersion` semantics let you resume a rebuild from a snapshot's `version + 1` without an off-by-one dance.
 
 For the plain outbox / projection use case (no aggregates, no per-stream ordering), use the simpler `Store.Append` path. It just inserts events in the order received and does not enforce per-stream ordering — the right tool for relays that just need durable, ordered event delivery.
+
+The two write paths share a table but are separate worlds: events written via `Store.Append` carry no stream version (persisted as SQL `NULL`, delivered to relay handlers with `StreamVersion == -1`). They are never returned by `ReadStream` and do not count toward `LatestStreamVersion`, so they cannot interfere with a stream's optimistic-concurrency contract. Relays see events from both paths.
+
+> **Don't delete an aggregate's history.** `TransientRelay` and `CleanUpToIncluding` delete events. Run them only against dedicated outbox tables, never against a table that holds event-sourced streams — and when several pointer relays share a table, clean up only below the *minimum* cursor across all of them.
 
 ### Stores
 
@@ -314,7 +320,9 @@ For the plain outbox / projection use case (no aggregates, no per-stream orderin
 
 **ErrIncrementIDConflict** — returned by an `IncrementIDStore` when the stored position changed between read and write, so a concurrent relay can detect it lost the optimistic-locking race.
 
-**ErrStreamVersionConflict** — returned by `StreamStore.AppendWithExpectedVersion` when the stream's current head does not match `expectedVersion`. `errors.As` against `*eventstore.StreamVersionConflictError` exposes the conflicting `StreamID`, `EventID`, and the `Expected` vs. `Got` positions. Aggregates use this to reload and retry.
+**ErrStreamVersionConflict** — returned by `StreamStore.AppendWithExpectedVersion` when the stream's current head does not match `expectedVersion`, or when a concurrent writer won the race for the same version (detected via the `UNIQUE (stream_id, stream_version)` index). `errors.As` against `*eventstore.StreamVersionConflictError` exposes the conflicting `StreamID`, `EventID`, and the `Expected` vs. `Got` positions. Aggregates use this to reload and retry.
+
+**ErrInvalidStreamAppend** — returned by `StreamStore.AppendWithExpectedVersion` when the call itself is malformed: an event in the batch belongs to a different stream than the `streamID` parameter, or `expectedVersion` is below the `-1` sentinel. These are programming errors, not concurrency conflicts — retry loops must not catch them.
 
 **ErrNilFactory** — returned from `Run` when a relay was constructed with a nil handler factory.
 

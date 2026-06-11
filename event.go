@@ -85,8 +85,11 @@ type StoredEvent struct {
 	// Metadata carries the cross-cutting metadata persisted alongside the event.
 	// It is nil for events that did not have metadata when they were appended.
 	Metadata Metadata
-	// StreamVersion is the per-stream position this event occupies. Stores
-	// enforce that, for each stream, this equals the previously-stored
-	// StreamVersion + 1, or 0 for the first event of a fresh stream.
+	// StreamVersion is the per-stream position this event occupies, assigned
+	// by StreamStore.AppendWithExpectedVersion: for each stream it equals the
+	// previously-stored StreamVersion + 1, or 0 for the first event of a
+	// fresh stream. Events written via the plain Store.Append path carry no
+	// version; they are delivered with StreamVersion == -1 (the same
+	// "unversioned" sentinel used by StreamVersionReader.LatestStreamVersion).
 	StreamVersion int
 }

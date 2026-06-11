@@ -10,10 +10,19 @@ import (
 	"strings"
 	"time"
 
+	gomysql "github.com/go-sql-driver/mysql"
 	"github.com/gofrs/uuid/v5"
 
 	"github.com/Bibob7/go-eventstore"
 )
+
+// mysqlErrDuplicateKey is MySQL error 1062 (ER_DUP_ENTRY), raised when an
+// insert violates a UNIQUE index — here: (stream_id, stream_version).
+const mysqlErrDuplicateKey = 1062
+
+// occurredAtFormat is the DATETIME(6) wire format: always write six
+// fractional digits so sub-second precision survives the round-trip.
+const occurredAtFormat = "2006-01-02 15:04:05.000000"
 
 type EventStore struct {
 	db        *sql.DB
@@ -75,17 +84,20 @@ func (s *EventStore) Append(ctx context.Context, domainEvents ...eventstore.Doma
 //   - N ≥ 0: the stream's current head MUST be exactly N. This is the
 //     case after replaying N+1 events during Load.
 //
-// All events in the batch MUST have StreamID() == streamID; otherwise a
-// *StreamVersionConflictError is returned (treating a mismatched event
-// as a concurrency violation keeps the contract simple and surfaces the
-// bug at the point of failure).
+// All events in the batch MUST have StreamID() == streamID, and
+// expectedVersion MUST be >= -1; otherwise an error wrapping
+// eventstore.ErrInvalidStreamAppend is returned (a programming error,
+// distinct from a concurrency conflict so retry loops don't catch it).
 //
-// The check and the insert run inside the same transaction (caller-
-// supplied via WithTx/GetTx, or store-owned), so concurrent appends
-// to the same stream see either the pre-state or the post-state, never
-// an interleaving. A version mismatch is reported as a
-// *StreamVersionConflictError wrapping ErrStreamVersionConflict; the
-// transaction is rolled back.
+// Concurrency is enforced in two layers. The version pre-check runs
+// inside the same transaction as the insert (caller-supplied via
+// WithTx/GetTx, or store-owned) and reports a stale expectedVersion as a
+// *StreamVersionConflictError wrapping ErrStreamVersionConflict. Because
+// that pre-check is a non-locking snapshot read, two concurrent writers
+// can both pass it — the UNIQUE index on (stream_id, stream_version) then
+// rejects the loser's insert, which is reported as the same
+// *StreamVersionConflictError. Either way the transaction is rolled back
+// and the caller can reload and retry.
 func (s *EventStore) AppendWithExpectedVersion(
 	ctx context.Context,
 	streamID uuid.UUID,
@@ -93,28 +105,20 @@ func (s *EventStore) AppendWithExpectedVersion(
 	domainEvents ...eventstore.DomainEvent,
 ) error {
 	if expectedVersion < -1 {
-		return &eventstore.StreamVersionConflictError{
-			StreamID: streamID,
-			EventID:  uuid.Nil,
-			Expected: -1,
-			Got:      expectedVersion,
-		}
+		return fmt.Errorf("%w: expectedVersion %d is below the -1 sentinel (stream %s)",
+			eventstore.ErrInvalidStreamAppend, expectedVersion, streamID)
 	}
 	if len(domainEvents) == 0 {
 		return nil
 	}
 	// Every event in the batch must belong to the same stream; this is
-	// part of the StreamStore contract. A mismatch is reported as a
-	// conflict (it is almost certainly a bug, but reporting it as a
-	// concurrency violation keeps the failure path uniform).
-	for i, ev := range domainEvents {
+	// part of the StreamStore contract. A mismatch is a programming error,
+	// not a concurrency conflict — report it as such so aggregate retry
+	// loops don't reload-and-retry on a bug.
+	for _, ev := range domainEvents {
 		if ev.StreamID() != streamID {
-			return &eventstore.StreamVersionConflictError{
-				StreamID: streamID,
-				EventID:  ev.ID(),
-				Expected: expectedVersion + 1 + i,
-				Got:      -1, // signals "wrong stream for this batch"
-			}
+			return fmt.Errorf("%w: event %s belongs to stream %s, not %s",
+				eventstore.ErrInvalidStreamAppend, ev.ID(), ev.StreamID(), streamID)
 		}
 	}
 
@@ -139,10 +143,44 @@ func (s *EventStore) AppendWithExpectedVersion(
 		return s.insertEvents(ctx, tx, domainEvents, versions)
 	}
 
+	var err error
 	if tx, exists := GetTx(ctx); exists {
-		return run(tx)
+		err = run(tx)
+	} else {
+		err = WithTransaction(ctx, s.db, run, nil)
 	}
-	return WithTransaction(ctx, s.db, run, nil)
+	return s.mapDuplicateVersionError(ctx, err, streamID, expectedVersion, domainEvents[0].ID())
+}
+
+// mapDuplicateVersionError translates a duplicate-key violation on the
+// (stream_id, stream_version) UNIQUE index into a *StreamVersionConflictError.
+//
+// The MAX(stream_version) pre-check in AppendWithExpectedVersion is a
+// non-locking snapshot read, so two concurrent transactions can both pass it
+// and race to insert the same version. The UNIQUE constraint is what actually
+// guarantees the optimistic-concurrency contract: the loser's insert fails
+// with MySQL error 1062, which this function reports as the same conflict the
+// pre-check would have raised.
+func (s *EventStore) mapDuplicateVersionError(ctx context.Context, err error, streamID uuid.UUID, expectedVersion int, firstEventID uuid.UUID) error {
+	var mysqlErr *gomysql.MySQLError
+	if !errors.As(err, &mysqlErr) || mysqlErr.Number != mysqlErrDuplicateKey {
+		return err
+	}
+	// Best-effort read of the actual head for diagnostics. It must run on a
+	// fresh connection: inside the failed transaction the REPEATABLE READ
+	// snapshot would not see the winner's commit. The duplicate key proves
+	// the head is at least expectedVersion+1, so that is the fallback when
+	// the read fails.
+	got, readErr := s.LatestStreamVersion(ctx, streamID)
+	if readErr != nil {
+		got = expectedVersion + 1
+	}
+	return &eventstore.StreamVersionConflictError{
+		StreamID: streamID,
+		EventID:  firstEventID,
+		Expected: expectedVersion,
+		Got:      got,
+	}
 }
 
 // currentStreamVersion returns the highest stream_version persisted for
@@ -169,8 +207,10 @@ func (s *EventStore) currentStreamVersion(ctx context.Context, tx *sql.Tx, strea
 // insertEvents builds and executes the multi-row INSERT for the batch.
 // When versions is non-nil it must have the same length as domainEvents
 // and the i-th version is assigned to the i-th event (StreamStore path).
-// When versions is nil, every row gets stream_version = 0 (Store path —
+// When versions is nil, every row gets stream_version = NULL (Store path —
 // the plain append-only log that does not enforce per-stream ordering).
+// NULL keeps unversioned rows out of the (stream_id, stream_version)
+// UNIQUE index, so the two write paths cannot collide.
 func (s *EventStore) insertEvents(ctx context.Context, tx *sql.Tx, domainEvents []eventstore.DomainEvent, versions []int) error {
 	if versions != nil && len(versions) != len(domainEvents) {
 		return fmt.Errorf("insertEvents: versions length %d != events length %d", len(versions), len(domainEvents))
@@ -206,13 +246,13 @@ func (s *EventStore) insertEvents(ctx context.Context, tx *sql.Tx, domainEvents 
 		if versions != nil {
 			valuesArgs[j+2] = versions[i]
 		} else {
-			valuesArgs[j+2] = 0
+			valuesArgs[j+2] = nil
 		}
 		valuesArgs[j+3] = domainEvent.EventType()
 		valuesArgs[j+4] = eventPayloadJsonString
 		// Always persist in UTC so reads are timezone-stable, independent of
 		// the producer's local timezone or driver configuration.
-		valuesArgs[j+5] = domainEvent.OccurredAt().UTC().Format(time.DateTime)
+		valuesArgs[j+5] = domainEvent.OccurredAt().UTC().Format(occurredAtFormat)
 		// Metadata: nil and empty maps both map to SQL NULL so we don't pay
 		// for a JSON round-trip on every row when no metadata is attached.
 		var md eventstore.Metadata
@@ -310,7 +350,9 @@ func (s *EventStore) LatestStreamVersion(ctx context.Context, streamID uuid.UUID
 
 // ReadStream returns up to limit events for the given stream, ordered by
 // StreamVersion ascending, starting at fromVersion inclusive. It satisfies
-// the eventstore.StreamReader interface.
+// the eventstore.StreamReader interface. Unversioned events written via
+// the plain Append path (stream_version NULL) are not part of any stream
+// and are never returned.
 func (s *EventStore) ReadStream(ctx context.Context, streamID uuid.UUID, fromVersion, limit int) ([]eventstore.StoredEvent, error) {
 	if fromVersion < 0 {
 		fromVersion = 0
@@ -399,7 +441,7 @@ func (s *EventStore) transformToStoredEvents(rows *sql.Rows) ([]eventstore.Store
 			id            int64
 			eventID       []byte
 			streamID      []byte
-			streamVersion int
+			streamVersion sql.NullInt64
 			eventPayload  string
 			eventType     string
 			occurredAt    string
@@ -411,7 +453,9 @@ func (s *EventStore) transformToStoredEvents(rows *sql.Rows) ([]eventstore.Store
 		}
 
 		// Values are written in UTC (see Append), so read them back in UTC
-		// to guarantee a timezone-stable round-trip.
+		// to guarantee a timezone-stable round-trip. time.DateTime parses an
+		// optional fractional second even though the layout omits it, so both
+		// legacy DATETIME and DATETIME(6) values round-trip.
 		occurredOnTime, err := time.ParseInLocation(time.DateTime, occurredAt, time.UTC)
 		if err != nil {
 			return nil, err
@@ -434,11 +478,18 @@ func (s *EventStore) transformToStoredEvents(rows *sql.Rows) ([]eventstore.Store
 			}
 		}
 
+		// NULL stream_version marks an unversioned event (plain Append path);
+		// -1 is the documented sentinel on StoredEvent.
+		version := -1
+		if streamVersion.Valid {
+			version = int(streamVersion.Int64)
+		}
+
 		events = append(events, eventstore.StoredEvent{
 			IncrementID:   id,
 			ID:            uuidEventID,
 			StreamID:      uuidStreamID,
-			StreamVersion: streamVersion,
+			StreamVersion: version,
 			EventType:     eventType,
 			Payload:       eventPayload,
 			OccurredAt:    occurredOnTime,

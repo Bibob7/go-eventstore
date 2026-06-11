@@ -41,28 +41,29 @@ func ensureEventStoreTable(t *testing.T, db *sql.DB) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Create table if not exists. Schema mirrored from sql/mysql/schema.sql
-	stmt := `CREATE TABLE IF NOT EXISTS event_store (
-        id INT NOT NULL AUTO_INCREMENT,
+	// Drop and recreate so schema changes take effect even when an older
+	// table is left over in the test database. Schema mirrored from
+	// sql/mysql/schema.sql.
+	_, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS "+eventStoreTable)
+	require.NoError(t, err)
+
+	stmt := `CREATE TABLE event_store (
+        id BIGINT NOT NULL AUTO_INCREMENT,
         event_id BINARY(16) NOT NULL,
         stream_id BINARY(16) NOT NULL,
-        stream_version INT NOT NULL DEFAULT 0,
+        stream_version INT NULL,
         event_type VARCHAR(255) NOT NULL,
         payload JSON NOT NULL,
-        occurred_at DATETIME NOT NULL,
+        occurred_at DATETIME(6) NOT NULL,
         metadata JSON NULL,
         PRIMARY KEY (id),
         KEY stream_id_idx (stream_id),
         KEY event_type_idx (event_type),
         KEY event_id_idx (event_id),
-        KEY stream_version_idx (stream_id, stream_version)
+        UNIQUE KEY stream_version_uq (stream_id, stream_version)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;`
 
-	_, err := db.ExecContext(ctx, stmt)
-	require.NoError(t, err)
-
-	// Clean slate for each test run
-	_, err = db.ExecContext(ctx, "TRUNCATE TABLE "+eventStoreTable)
+	_, err = db.ExecContext(ctx, stmt)
 	require.NoError(t, err)
 }
 
@@ -115,6 +116,11 @@ func mustBinary(u uuid.UUID) []byte {
 }
 
 func fetchIDs(events []eventstore.StoredEvent) []int64 {
+	// nil for an empty batch so expectations can be written as nil
+	// (require.Equal distinguishes nil from an empty slice).
+	if len(events) == 0 {
+		return nil
+	}
 	ids := make([]int64, len(events))
 	for i, e := range events {
 		ids[i] = e.IncrementID
@@ -327,6 +333,9 @@ func TestEventStore_AppendFetchRoundTrip(t *testing.T) {
 	}{
 		{name: "UTC timestamp", occurred: time.Date(2026, 4, 5, 12, 34, 56, 0, time.UTC)},
 		{name: "local timezone timestamp", occurred: time.Date(2026, 4, 5, 14, 0, 0, 0, berlin)},
+		// DATETIME(6) keeps microsecond precision; sub-second parts of
+		// OccurredAt must survive the round-trip.
+		{name: "microsecond precision survives", occurred: time.Date(2026, 4, 5, 12, 34, 56, 123456000, time.UTC)},
 	}
 
 	for _, tc := range tests {
@@ -715,31 +724,61 @@ func TestEventStore_AppendWithExpectedVersion_RejectsConflicts(t *testing.T) {
 	}
 }
 
-// TestEventStore_AppendWithExpectedVersion_RejectsForeignStreamEvent
-// verifies that an event whose StreamID() does not match the streamID
-// parameter is reported as a *StreamVersionConflictError, not silently
-// inserted. This is the per-batch single-stream invariant: a StreamStore
-// is the gatekeeper for one stream, and a mixed batch is a bug.
-func TestEventStore_AppendWithExpectedVersion_RejectsForeignStreamEvent(t *testing.T) {
-	db := openTestDB(t)
-	defer func() { _ = db.Close() }()
-	ensureEventStoreTable(t, db)
+// TestEventStore_AppendWithExpectedVersion_RejectsInvalidAppends verifies
+// that malformed calls — a batch containing an event of a foreign stream,
+// or an expectedVersion below the -1 sentinel — are reported as
+// ErrInvalidStreamAppend (a programming error), NOT as a stream version
+// conflict, and that nothing is inserted.
+func TestEventStore_AppendWithExpectedVersion_RejectsInvalidAppends(t *testing.T) {
+	tests := []struct {
+		name            string
+		expectedVersion int
+		// events builds the batch for the stream under test (streamA).
+		events func(t *testing.T, streamA uuid.UUID) []eventstore.DomainEvent
+	}{
+		{
+			name:            "batch contains event of a foreign stream",
+			expectedVersion: -1,
+			events: func(t *testing.T, streamA uuid.UUID) []eventstore.DomainEvent {
+				streamB := mustUUID(t)
+				return []eventstore.DomainEvent{
+					newTestEvent(t, streamA, "for-a"),
+					newTestEvent(t, streamB, "actually-for-b"),
+				}
+			},
+		},
+		{
+			name:            "expectedVersion below the -1 sentinel",
+			expectedVersion: -2,
+			events: func(t *testing.T, streamA uuid.UUID) []eventstore.DomainEvent {
+				return []eventstore.DomainEvent{newTestEvent(t, streamA, "x")}
+			},
+		},
+	}
 
-	streamA := mustUUID(t)
-	streamB := mustUUID(t)
-	store := NewEventStore(db, eventStoreTable)
-	ctx := context.Background()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			defer func() { _ = db.Close() }()
+			ensureEventStoreTable(t, db)
 
-	evtA := newTestEvent(t, streamA, "for-a")
-	evtB := newTestEvent(t, streamB, "actually-for-b")
-	err := store.AppendWithExpectedVersion(ctx, streamA, -1, evtA, evtB)
-	require.Error(t, err)
-	var conflict *eventstore.StreamVersionConflictError
-	require.ErrorAs(t, err, &conflict)
-	assert.Equal(t, streamA, conflict.StreamID)
-	assert.Equal(t, evtB.ID(), conflict.EventID)
-	// Got is set to -1 to signal "wrong stream for this batch".
-	assert.Equal(t, -1, conflict.Got)
+			streamA := mustUUID(t)
+			store := NewEventStore(db, eventStoreTable)
+			ctx := context.Background()
+
+			err := store.AppendWithExpectedVersion(ctx, streamA, tc.expectedVersion, tc.events(t, streamA)...)
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, eventstore.ErrInvalidStreamAppend),
+				"want ErrInvalidStreamAppend, got %v", err)
+			assert.False(t, errors.Is(err, eventstore.ErrStreamVersionConflict),
+				"an invalid append must not look like a concurrency conflict (retry loops would loop forever)")
+
+			// Nothing must have been inserted.
+			rows, fetchErr := store.FetchBatchOfEventsSince(ctx, -1, 10)
+			require.NoError(t, fetchErr)
+			assert.Empty(t, rows)
+		})
+	}
 }
 
 // TestEventStore_AppendWithExpectedVersion_StreamsAreIndependent
@@ -873,8 +912,10 @@ func TestEventStore_ReadStream_OtherStreamUnaffected(t *testing.T) {
 
 // TestEventStore_Append_PlainAppendOnly verifies that Store.Append (the
 // plain append-only-log path, no per-stream ordering enforced) just
-// inserts events regardless of their StreamID. It is the right path for
-// outbox / projection workloads that don't model aggregates.
+// inserts events regardless of their StreamID, and that those events are
+// unversioned: they are delivered to relays with StreamVersion == -1 and
+// are NOT part of any stream (ReadStream never returns them). The two
+// write paths share a table but are separate worlds.
 func TestEventStore_Append_PlainAppendOnly(t *testing.T) {
 	db := openTestDB(t)
 	defer func() { _ = db.Close() }()
@@ -892,9 +933,19 @@ func TestEventStore_Append_PlainAppendOnly(t *testing.T) {
 		newTestEvent(t, streamA, "a1"),
 	))
 
+	// The relay path sees all three events, each carrying the -1
+	// "unversioned" sentinel.
+	fetched, err := store.FetchBatchOfEventsSince(ctx, -1, 100)
+	require.NoError(t, err)
+	require.Len(t, fetched, 3)
+	for _, e := range fetched {
+		assert.Equal(t, -1, e.StreamVersion, "plain-appended events must be unversioned")
+	}
+
+	// The stream path does not see them: they have no stream_version.
 	rows, err := store.ReadStream(ctx, streamA, 0, 100)
 	require.NoError(t, err)
-	assert.Len(t, rows, 2)
+	assert.Empty(t, rows, "unversioned events must not appear in ReadStream")
 }
 
 // TestEventStore_LatestStreamVersion verifies that the cheap pre-check
@@ -976,13 +1027,151 @@ func TestEventStore_LatestStreamVersion(t *testing.T) {
 	}
 }
 
-// TestEventStore_LatestStreamVersion_WorksOnStoreAppend verifies that
-// LatestStreamVersion is a read-side query that does not depend on which
-// write path produced the events — events inserted via the plain
-// Store.Append path are just as visible as events written via
-// AppendWithExpectedVersion. This locks down the separation between the
-// write paths and the read-side stream view.
-func TestEventStore_LatestStreamVersion_WorksOnStoreAppend(t *testing.T) {
+// TestEventStore_AppendWithExpectedVersion_ConcurrentWritersConflict is
+// the regression test for the optimistic-concurrency race: the
+// MAX(stream_version) pre-check is a non-locking snapshot read, so two
+// concurrent transactions can both pass it. The UNIQUE index on
+// (stream_id, stream_version) must then reject the loser.
+//
+// The interleaving is forced deterministically: writer 1 appends inside
+// an open (uncommitted) transaction, so its version pre-check passes and
+// its insert holds the unique-index lock. Writer 2 (own transaction)
+// passes the same pre-check — the snapshot cannot see writer 1's
+// uncommitted row — and its insert blocks on the lock. When writer 1
+// commits, writer 2 must fail with ErrStreamVersionConflict, not commit
+// a duplicate version. (If the goroutine is scheduled only after the
+// commit, writer 2 fails the pre-check instead — same contract, so the
+// test holds either way.)
+func TestEventStore_AppendWithExpectedVersion_ConcurrentWritersConflict(t *testing.T) {
+	tests := []struct {
+		name      string
+		seedCount int // events seeded before the race; both writers append at head = seedCount-1
+	}{
+		{name: "two writers racing to create an empty stream", seedCount: 0},
+		{name: "two writers racing at the head of an existing stream", seedCount: 2},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			defer func() { _ = db.Close() }()
+			ensureEventStoreTable(t, db)
+
+			streamID := mustUUID(t)
+			store := NewEventStore(db, eventStoreTable)
+			ctx := context.Background()
+
+			if tc.seedCount > 0 {
+				seed := make([]eventstore.DomainEvent, tc.seedCount)
+				for i := range seed {
+					seed[i] = newTestEvent(t, streamID, "seed")
+				}
+				require.NoError(t, store.AppendWithExpectedVersion(ctx, streamID, -1, seed...))
+			}
+			head := tc.seedCount - 1 // -1 for the empty stream
+
+			// Writer 1: append at head inside an open transaction.
+			tx1, err := db.BeginTx(ctx, nil)
+			require.NoError(t, err)
+			defer func() { _ = tx1.Rollback() }()
+			require.NoError(t, store.AppendWithExpectedVersion(WithTx(ctx, tx1), streamID, head,
+				newTestEvent(t, streamID, "winner")))
+
+			// Writer 2: same head, own transaction. Blocks on the unique
+			// index until writer 1 commits.
+			loserErr := make(chan error, 1)
+			go func() {
+				loserErr <- store.AppendWithExpectedVersion(ctx, streamID, head,
+					newTestEvent(t, streamID, "loser"))
+			}()
+
+			// Give writer 2 time to pass its pre-check and block on the insert.
+			time.Sleep(300 * time.Millisecond)
+			require.NoError(t, tx1.Commit())
+
+			err = <-loserErr
+			require.Error(t, err, "the losing writer must not silently append a duplicate version")
+			var conflict *eventstore.StreamVersionConflictError
+			require.ErrorAs(t, err, &conflict)
+			assert.True(t, errors.Is(err, eventstore.ErrStreamVersionConflict))
+			assert.Equal(t, streamID, conflict.StreamID)
+			assert.Equal(t, head, conflict.Expected)
+			assert.Equal(t, head+1, conflict.Got, "diagnostics must report the winner's head")
+
+			// Exactly one event won the slot at version head+1.
+			rows, err := store.ReadStream(ctx, streamID, 0, 100)
+			require.NoError(t, err)
+			require.Len(t, rows, tc.seedCount+1)
+			assert.Equal(t, head+1, rows[len(rows)-1].StreamVersion)
+		})
+	}
+}
+
+// TestEventStore_AppendWithExpectedVersion_ManyConcurrentCreators races N
+// goroutines that all try to create the same stream (expectedVersion -1).
+// Exactly one may win; every loser must observe ErrStreamVersionConflict
+// (either via the pre-check or via the unique-index backstop), and the
+// stream must end up with exactly one event at version 0.
+func TestEventStore_AppendWithExpectedVersion_ManyConcurrentCreators(t *testing.T) {
+	tests := []struct {
+		name    string
+		writers int
+	}{
+		{name: "two concurrent creators", writers: 2},
+		{name: "eight concurrent creators", writers: 8},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			defer func() { _ = db.Close() }()
+			ensureEventStoreTable(t, db)
+
+			streamID := mustUUID(t)
+			store := NewEventStore(db, eventStoreTable)
+			ctx := context.Background()
+
+			start := make(chan struct{})
+			errs := make(chan error, tc.writers)
+			for i := 0; i < tc.writers; i++ {
+				go func() {
+					<-start
+					errs <- store.AppendWithExpectedVersion(ctx, streamID, -1,
+						newTestEvent(t, streamID, "create"))
+				}()
+			}
+			close(start)
+
+			var wins, conflicts int
+			for i := 0; i < tc.writers; i++ {
+				err := <-errs
+				switch {
+				case err == nil:
+					wins++
+				case errors.Is(err, eventstore.ErrStreamVersionConflict):
+					conflicts++
+				default:
+					t.Errorf("unexpected error kind: %v", err)
+				}
+			}
+			assert.Equal(t, 1, wins, "exactly one creator may win")
+			assert.Equal(t, tc.writers-1, conflicts, "every loser must see a version conflict")
+
+			rows, err := store.ReadStream(ctx, streamID, 0, 100)
+			require.NoError(t, err)
+			require.Len(t, rows, 1, "the stream must contain exactly one event")
+			assert.Equal(t, 0, rows[0].StreamVersion)
+		})
+	}
+}
+
+// TestEventStore_LatestStreamVersion_IgnoresPlainAppendedEvents verifies
+// that unversioned events (plain Store.Append path, stream_version NULL)
+// do not contribute to a stream's head: LatestStreamVersion keeps
+// returning the -1 "fresh stream" sentinel, so the stream can still be
+// created via AppendWithExpectedVersion(-1) afterwards. This locks down
+// the separation between the two write paths.
+func TestEventStore_LatestStreamVersion_IgnoresPlainAppendedEvents(t *testing.T) {
 	db := openTestDB(t)
 	defer func() { _ = db.Close() }()
 	ensureEventStoreTable(t, db)
@@ -999,10 +1188,12 @@ func TestEventStore_LatestStreamVersion_WorksOnStoreAppend(t *testing.T) {
 
 	got, err := store.LatestStreamVersion(ctx, streamID)
 	require.NoError(t, err)
-	// Three rows, but Store.Append writes them with stream_version = 0
-	// (the append-only path does not enforce per-stream ordering). The
-	// MAX is therefore 0, not 2. This is the documented difference
-	// between the two write paths: LatestStreamVersion reports what the
-	// store actually persisted, not what the caller "intended".
+	assert.Equal(t, -1, got, "unversioned events must not affect the stream head")
+
+	// The versioned world starts fresh for this stream.
+	require.NoError(t, store.AppendWithExpectedVersion(ctx, streamID, -1,
+		newTestEvent(t, streamID, "v0")))
+	got, err = store.LatestStreamVersion(ctx, streamID)
+	require.NoError(t, err)
 	assert.Equal(t, 0, got)
 }

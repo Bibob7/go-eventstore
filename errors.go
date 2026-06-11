@@ -21,6 +21,15 @@ import (
 // freshly observed stream state.
 var ErrStreamVersionConflict = errors.New("event store: stream version conflict")
 
+// ErrInvalidStreamAppend is returned by StreamStore.AppendWithExpectedVersion
+// when the call itself is malformed: an event in the batch belongs to a
+// different stream than the streamID parameter, or expectedVersion is below
+// the -1 sentinel. These are programming errors, not concurrency conflicts —
+// reloading and retrying (the correct reaction to ErrStreamVersionConflict)
+// cannot fix them, so they are reported as a distinct sentinel that retry
+// loops must not catch.
+var ErrInvalidStreamAppend = errors.New("event store: invalid stream append")
+
 // StreamVersionConflictError provides the concrete stream/event that
 // triggered an ErrStreamVersionConflict. The sentinel is the
 // `errors.Is`-friendly value; this struct carries the diagnostics.
