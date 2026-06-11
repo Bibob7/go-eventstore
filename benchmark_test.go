@@ -253,10 +253,8 @@ func BenchmarkTransientRelay(b *testing.B) {
 							StreamID:    uid,
 							EventType:   "bench-event",
 							Payload:     `{"bench":true}`,
-							OccurredAt:  time.Now(),
-							// Version is intentionally 0: bench events are
-							// single-shot and not concerned with per-stream
-							// ordering, so a default of 0 is fine.
+							OccurredAt:    time.Now(),
+							StreamVersion: -1,
 						})
 					}
 				}
