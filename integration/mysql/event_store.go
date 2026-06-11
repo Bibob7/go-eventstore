@@ -496,5 +496,11 @@ func (s *EventStore) transformToStoredEvents(rows *sql.Rows) ([]eventstore.Store
 			Metadata:      metadata,
 		})
 	}
+	// rows.Next() returns false on both end-of-set and iteration errors
+	// (e.g. a connection drop mid-result); without this check a truncated
+	// result would be returned as a complete one.
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return events, nil
 }
