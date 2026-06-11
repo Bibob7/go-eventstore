@@ -244,16 +244,7 @@ Reserved keys (by convention — the store does not enforce them):
 
 Custom keys are welcome. `nil` and an empty map are treated as equivalent and persisted as SQL `NULL` (no JSON overhead per row).
 
-For events that have no metadata, embed `eventstore.BaseEvent` to satisfy the `Metadata()` method with `nil`:
-
-```go
-type OrderPlaced struct {
-    eventstore.BaseEvent
-    OrderID string
-}
-```
-
-To attach metadata, override `Metadata()` on the embedding type:
+Metadata is opt-in via the `MetadataProvider` interface, which the store checks with a type assertion at append time. Events that have no metadata simply don't implement it — nothing to embed, nothing to override. To attach metadata, define the `Metadata()` method:
 
 ```go
 func (e OrderPlaced) Metadata() eventstore.Metadata {

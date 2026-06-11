@@ -156,14 +156,12 @@ func (o *order) addItem(name string, qty int) error {
 
 // --- Events -------------------------------------------------------------
 
-// orderCreated and itemAdded are domain events. They embed eventstore.BaseEvent
-// for the ID/StreamID/EventType/OccurredAt plumbing; the application code
-// overrides Metadata when it needs to. Note that the events do NOT carry a
-// StreamVersion — the per-stream position is assigned by the store on append
-// and tracked on the aggregate via the last StoredEvent.StreamVersion seen
-// during Load.
+// orderCreated and itemAdded are domain events. They don't implement the
+// optional eventstore.MetadataProvider interface — events without metadata
+// simply omit it. Note that the events also do NOT carry a StreamVersion —
+// the per-stream position is assigned by the store on append and tracked on
+// the aggregate via the last StoredEvent.StreamVersion seen during Load.
 type orderCreated struct {
-	eventstore.BaseEvent
 	EventID    uuid.UUID `json:"event_id"`
 	OrderID    uuid.UUID `json:"order_id"`
 	CustomerID string    `json:"customer_id"`
@@ -178,7 +176,6 @@ func (e *orderCreated) EventType() string     { return "order.created" }
 func (e *orderCreated) OccurredAt() time.Time { return e.OccurredOn }
 
 type itemAdded struct {
-	eventstore.BaseEvent
 	EventID    uuid.UUID `json:"event_id"`
 	OrderID    uuid.UUID `json:"order_id"`
 	OccurredOn time.Time `json:"occurred_at"`

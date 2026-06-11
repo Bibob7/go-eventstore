@@ -4,13 +4,10 @@ import (
 	"time"
 
 	"github.com/gofrs/uuid/v5"
-
-	"github.com/Bibob7/go-eventstore"
 )
 
 // OrderPlaced is a domain event used across all examples.
 type OrderPlaced struct {
-	eventstore.BaseEvent
 	EventID    uuid.UUID `json:"event_id"`
 	OrderID    uuid.UUID `json:"order_id"`
 	CustomerID string    `json:"customer_id"`
