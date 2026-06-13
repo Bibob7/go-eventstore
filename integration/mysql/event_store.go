@@ -353,6 +353,11 @@ func (s *EventStore) LatestStreamVersion(ctx context.Context, streamID uuid.UUID
 // the eventstore.StreamReader interface. Unversioned events written via
 // the plain Append path (stream_version NULL) are not part of any stream
 // and are never returned.
+//
+// At most limit events are returned: a stream longer than limit is
+// truncated. To load an entire stream regardless of length (e.g. to
+// reconstruct an aggregate), use eventstore.ReadStreamAll, which pages
+// through this method until the stream is exhausted.
 func (s *EventStore) ReadStream(ctx context.Context, streamID uuid.UUID, fromVersion, limit int) ([]eventstore.StoredEvent, error) {
 	if fromVersion < 0 {
 		fromVersion = 0

@@ -34,5 +34,17 @@ type Relay interface {
 	Name() string
 	// Run fetches the next batch of events and dispatches them to the
 	// handler. It returns nil when the batch is empty or fully processed.
+	//
+	// Run is NOT safe to call concurrently for the same relay. A
+	// cursor-based relay reads its position, fetches events from it, and
+	// only then advances it, so two overlapping Runs — or two relay
+	// instances that share the same name — read the same cursor and
+	// deliver the same events to every caller (duplicate processing); the
+	// SetIncrementID compare-and-swap only protects the stored cursor
+	// value, not the redundant work. Likewise, running several instances
+	// of a transient relay against one store competes for the same rows.
+	// Call Run sequentially in a loop (e.g. via a ticker). To process a
+	// single batch across multiple goroutines, use WithParallelism, which
+	// fans out within one Run while keeping a single cursor.
 	Run(ctx context.Context) error
 }

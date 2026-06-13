@@ -130,6 +130,12 @@ type StreamReader interface {
 	// version 0 (the first event of the stream) and onward. The returned
 	// slice may be empty when the stream has no events at or after
 	// fromVersion.
+	//
+	// ReadStream returns AT MOST limit events: a stream longer than limit
+	// is truncated, and a caller that reconstructs an aggregate from a
+	// truncated history will compute a stale expectedVersion. To read an
+	// entire stream regardless of length, use ReadStreamAll, which pages
+	// until the stream is exhausted.
 	ReadStream(ctx context.Context, streamID uuid.UUID, fromVersion, limit int) ([]StoredEvent, error)
 }
 
