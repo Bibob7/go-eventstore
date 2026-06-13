@@ -94,7 +94,12 @@ func (t *transientRelay) Run(ctx context.Context) (err error) {
 		if len(processed) == 0 {
 			return
 		}
-		if cleanUpErr := t.store.CleanUpEvents(ctx, processed); cleanUpErr != nil && err == nil {
+		// Clean up on a context detached from ctx: a graceful shutdown
+		// cancels ctx, but these events were already handled and must be
+		// removed or they are re-processed on restart.
+		cleanupCtx, cancel := detachedPersistCtx(ctx)
+		defer cancel()
+		if cleanUpErr := t.store.CleanUpEvents(cleanupCtx, processed); cleanUpErr != nil && err == nil {
 			err = fmt.Errorf("failed to clean up events: %w", cleanUpErr)
 		}
 	}()

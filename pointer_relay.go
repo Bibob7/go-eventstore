@@ -140,7 +140,12 @@ func (p *pointerRelay) Run(ctx context.Context) (err error) {
 			slog.Debug("No events relayed", "name", p.name, "last_increment_id", lastIncrementID)
 			return
 		}
-		if setErr := p.incrementIDStore.SetIncrementID(ctx, p.name, lastIncrementID, newLastIncrementID); setErr != nil && err == nil {
+		// Persist the cursor on a context detached from ctx: a graceful
+		// shutdown cancels ctx, but these events were already processed and
+		// must be acknowledged or the whole batch is re-delivered on restart.
+		persistCtx, cancel := detachedPersistCtx(ctx)
+		defer cancel()
+		if setErr := p.incrementIDStore.SetIncrementID(persistCtx, p.name, lastIncrementID, newLastIncrementID); setErr != nil && err == nil {
 			err = fmt.Errorf("failed to set new increment id: %w", setErr)
 		}
 	}()

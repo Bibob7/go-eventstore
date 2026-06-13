@@ -26,7 +26,12 @@ func (m *mockTransientStore) FetchBatchOfEvents(_ context.Context, limit int) ([
 	return m.events, nil
 }
 
-func (m *mockTransientStore) CleanUpEvents(_ context.Context, events []StoredEvent) error {
+func (m *mockTransientStore) CleanUpEvents(ctx context.Context, events []StoredEvent) error {
+	// Mirror a real database: refuse to execute on a cancelled context so
+	// tests can prove the relay cleans up on a detached context.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if m.cleanUpErr != nil {
 		return m.cleanUpErr
 	}
@@ -197,6 +202,57 @@ func TestTransientRelay_CleansUpEventsAsBatch(t *testing.T) {
 				if len(store.calls[i]) != want {
 					t.Errorf("call %d: expected %d events, got %d", i, want, len(store.calls[i]))
 				}
+			}
+		})
+	}
+}
+
+// TestTransientRelay_PersistsCleanupOnCancelledContext proves that a
+// graceful shutdown which cancels the run context still removes the
+// events that were already handled. The mock store honours ctx
+// cancellation like a real database, so this test fails if the relay
+// reused the cancelled ctx for the cleanup instead of a detached one.
+func TestTransientRelay_PersistsCleanupOnCancelledContext(t *testing.T) {
+	tests := []struct {
+		name          string
+		events        []StoredEvent
+		cancelOn      int // cancel the run context after the Nth handled event
+		wantCleanedUp int
+		wantErr       error
+	}{
+		{
+			name:          "cancellation after the whole batch still cleans up",
+			events:        []StoredEvent{newStoredEvent(1), newStoredEvent(2), newStoredEvent(3)},
+			cancelOn:      3,
+			wantCleanedUp: 3,
+			wantErr:       nil,
+		},
+		{
+			name:          "cancellation mid-batch cleans up the handled events",
+			events:        []StoredEvent{newStoredEvent(1), newStoredEvent(2), newStoredEvent(3)},
+			cancelOn:      2,
+			wantCleanedUp: 2,
+			wantErr:       context.Canceled,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &mockTransientStore{events: tc.events}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			h := &cancelOnNthHandler{n: tc.cancelOn, cancel: cancel}
+			relay := NewTransientHandlerRelay("cancel-relay", store, func(WorkerContext) Handler { return h })
+
+			err := relay.Run(ctx)
+
+			if tc.wantErr == nil && err != nil {
+				t.Fatalf("expected nil error, got %v", err)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("expected %v, got %v", tc.wantErr, err)
+			}
+			if len(store.cleanedUp) != tc.wantCleanedUp {
+				t.Errorf("expected %d cleaned-up events, got %d", tc.wantCleanedUp, len(store.cleanedUp))
 			}
 		})
 	}

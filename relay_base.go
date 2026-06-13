@@ -7,6 +7,23 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// relayPersistTimeout bounds the detached write that records relay
+// progress (cursor advance or event cleanup) after a batch was
+// processed. It exists so a wedged database during shutdown cannot block
+// a relay indefinitely on that final write.
+const relayPersistTimeout = 5 * time.Second
+
+// detachedPersistCtx derives a context for persisting relay progress that
+// is NOT cancelled when ctx is. A relay that already processed events
+// must still record that fact even when ctx was cancelled by a graceful
+// shutdown; reusing the cancelled ctx would make the database reject the
+// write, silently re-delivering the batch on restart. Parent values are
+// retained (so tracing/correlation survives) while the deadline is
+// replaced by relayPersistTimeout to bound the write.
+func detachedPersistCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), relayPersistTimeout)
+}
+
 // relayConfig carries the knobs collected from RelayOption. It is shared
 // by every concrete relay type as an embedded field so the option
 // setters can write through a single struct. Each relay also holds a
