@@ -7,9 +7,9 @@ import (
 	"github.com/gofrs/uuid/v5"
 )
 
-// ErrStreamVersionConflict is returned by Store.Append when one or more
-// events in the batch claim a StreamVersion that does not match the next
-// expected version for their stream. The exact conflicting stream and
+// ErrStreamVersionConflict is returned by StreamStore.AppendWithExpectedVersion
+// when the stream's current head does not match the caller's expectedVersion,
+// or when a concurrent writer wins the race for the same stream version.
 // event can be inspected by unwrapping the error:
 //
 //	var c *eventstore.StreamVersionConflictError
@@ -38,9 +38,9 @@ type StreamVersionConflictError struct {
 	StreamID uuid.UUID
 	// EventID is the event that failed the version check.
 	EventID uuid.UUID
-	// Expected is the version the store expected for this event.
+	// Expected is the stream version the caller expected to be the current head.
 	Expected int
-	// Got is the version the event claimed.
+	// Got is the actual stream head (highest StreamVersion) observed by the store.
 	Got int
 }
 

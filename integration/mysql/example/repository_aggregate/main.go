@@ -246,7 +246,7 @@ func (r *orderRepository) CreateOrder(ctx context.Context, orderID uuid.UUID, cu
 // StoredEvent.StreamVersion the aggregate sees becomes the in-memory
 // Version, which is the expectedVersion the next AddItem will pass back.
 func (r *orderRepository) LoadOrder(ctx context.Context, orderID uuid.UUID) (*order, error) {
-	// ReadStream uses inklusiv fromVersion semantics, so fromVersion=0 starts
+	// ReadStream uses inclusive fromVersion semantics, so fromVersion=0 starts
 	// at the first event. There's no upper limit on the read — for very
 	// long-lived streams you'd want snapshot support and resume from
 	// snapshotVersion+1, but that's out of scope for this example.
