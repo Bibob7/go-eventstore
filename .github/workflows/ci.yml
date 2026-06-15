@@ -63,8 +63,9 @@ jobs:
   benchmark-compare:
     name: Benchmark Regression
     runs-on: ubuntu-latest
-    # Only meaningful on PRs: compares the PR head against its base branch
-    # on the same runner so the numbers are directly comparable.
+    # Only meaningful on PRs: compares the PR head against its base branch.
+    # Runs are interleaved (head/base alternating) so both see the same
+    # shared-runner drift and benchstat compares like with like.
     if: github.event_name == 'pull_request'
     permissions:
       contents: read
@@ -92,21 +93,23 @@ jobs:
       - name: Install benchstat
         run: go install golang.org/x/perf/cmd/benchstat@latest
 
-      - name: Benchmark PR head
-        run: |
-          go test -run=^$ -bench=. -benchmem \
-            -benchtime="${BENCH_TIME}" -count="${BENCH_COUNT}" "${BENCH_PKG}" \
-            | tee head.txt
-
-      - name: Benchmark base (${{ github.event.pull_request.base.ref }})
+      - name: Build benchmark binaries (head and base)
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
+          go test -run=^$ -c -o "${RUNNER_TEMP}/head.test" "${BENCH_PKG}"
           git checkout --quiet --detach "${BASE_SHA}"
-          go test -run=^$ -bench=. -benchmem \
-            -benchtime="${BENCH_TIME}" -count="${BENCH_COUNT}" "${BENCH_PKG}" \
-            | tee base.txt
+          go test -run=^$ -c -o "${RUNNER_TEMP}/base.test" "${BENCH_PKG}"
           git checkout --quiet --force -
+
+      - name: Interleaved benchmark
+        run: |
+          : > head.txt
+          : > base.txt
+          for _ in $(seq 1 "${BENCH_COUNT}"); do
+            "${RUNNER_TEMP}/head.test" -test.run='^$' -test.bench=. -test.benchmem -test.benchtime="${BENCH_TIME}" -test.count=1 >> head.txt
+            "${RUNNER_TEMP}/base.test" -test.run='^$' -test.bench=. -test.benchmem -test.benchtime="${BENCH_TIME}" -test.count=1 >> base.txt
+          done
 
       - name: Compare with benchstat
         run: |
