@@ -20,7 +20,8 @@ func NewUntilGapEventFilter(lastIncrementID int64, gapDetector GapDetector) Filt
 	}
 }
 
-// Execute filters stored events based on increment ID gaps and detects uncommitted IDs using a gap detector contextually.
+// Execute returns the leading run of events with no gap in their IncrementID,
+// stopping at the first gap that the GapDetector reports as still uncommitted.
 func (f *untilGapEventFilter) Execute(ctx context.Context, storedEvents []StoredEvent) ([]StoredEvent, error) {
 	expectedIncrementID := f.lastIncrementID
 	var filteredEvents []StoredEvent

@@ -30,12 +30,16 @@ type benchDomainEvent struct {
 	streamID  uuid.UUID
 	eventType string
 	occurred  time.Time
+	metadata  Metadata
+	version   int
 }
 
 func (e *benchDomainEvent) ID() uuid.UUID         { return e.id }
 func (e *benchDomainEvent) StreamID() uuid.UUID   { return e.streamID }
 func (e *benchDomainEvent) EventType() string     { return e.eventType }
 func (e *benchDomainEvent) OccurredAt() time.Time { return e.occurred }
+func (e *benchDomainEvent) Metadata() Metadata    { return e.metadata }
+func (e *benchDomainEvent) StreamVersion() int    { return e.version }
 
 func newBenchEvent(id int64) DomainEvent {
 	uid, _ := uuid.NewV4()
@@ -67,12 +71,13 @@ func (s *benchTransientStore) Append(_ context.Context, events ...DomainEvent) e
 		}
 		s.nextID++
 		s.events = append(s.events, StoredEvent{
-			IncrementID: s.nextID,
-			ID:          be.id,
-			StreamID:    be.streamID,
-			EventType:   be.eventType,
-			Payload:     `{"bench":true}`,
-			OccurredAt:  be.occurred,
+			IncrementID:   s.nextID,
+			ID:            be.id,
+			StreamID:      be.streamID,
+			EventType:     be.eventType,
+			Payload:       `{"bench":true}`,
+			OccurredAt:    be.occurred,
+			StreamVersion: be.version,
 		})
 	}
 	return nil
@@ -131,12 +136,14 @@ func (s *benchPointerStore) Append(_ context.Context, events ...DomainEvent) err
 			return fmt.Errorf("unexpected event type %T", e)
 		}
 		s.events = append(s.events, StoredEvent{
-			IncrementID: int64(len(s.events)) + 1,
-			ID:          be.id,
-			StreamID:    be.streamID,
-			EventType:   be.eventType,
-			Payload:     `{"bench":true}`,
-			OccurredAt:  be.occurred,
+			IncrementID:   int64(len(s.events)) + 1,
+			ID:            be.id,
+			StreamID:      be.streamID,
+			EventType:     be.eventType,
+			Payload:       `{"bench":true}`,
+			OccurredAt:    be.occurred,
+			Metadata:      be.metadata,
+			StreamVersion: be.version,
 		})
 	}
 	return nil
@@ -241,12 +248,13 @@ func BenchmarkTransientRelay(b *testing.B) {
 						store.nextID++
 						uid, _ := uuid.NewV4()
 						store.events = append(store.events, StoredEvent{
-							IncrementID: store.nextID,
-							ID:          uid,
-							StreamID:    uid,
-							EventType:   "bench-event",
-							Payload:     `{"bench":true}`,
-							OccurredAt:  time.Now(),
+							IncrementID:   store.nextID,
+							ID:            uid,
+							StreamID:      uid,
+							EventType:     "bench-event",
+							Payload:       `{"bench":true}`,
+							OccurredAt:    time.Now(),
+							StreamVersion: -1,
 						})
 					}
 				}

@@ -5,11 +5,9 @@ import (
 	"fmt"
 )
 
-// transientRelay is the Relay implementation backed by a TransientStore.
-// Events that complete successfully are removed from the store via
-// CleanUpEvents. It is agnostic to the handler kind: the batchStrategy
-// chosen at construction time (plain Handler or BatchHandler) determines
-// how each batch is dispatched.
+// transientRelay is the Relay backed by a TransientStore: successfully
+// processed events are removed via CleanUpEvents. The strategy chosen at
+// construction dispatches each batch.
 type transientRelay struct {
 	relayConfig
 	name     string
@@ -44,34 +42,25 @@ func newTransientRelay(name string, store TransientStore, strategy batchStrategy
 	return relay
 }
 
-// NewTransientHandlerRelay creates a Relay that fetches events from
-// store, dispatches them to the handler the factory produces, and
-// removes each event after successful handling.
+// NewTransientHandlerRelay creates a Relay that fetches events from store,
+// dispatches them to the handler the factory produces, and removes each event
+// after successful handling. If factory is nil, the first Run returns
+// ErrNilFactory.
 //
-// factory produces one Handler instance per worker; within a Run it is
-// invoked the first time a worker is handed an event, with a
-// WorkerContext. Workers that receive no events never invoke the factory.
-// With parallelism == 1 a single instance is built. If factory is nil,
-// the first Run returns ErrNilFactory.
-//
-// The handler must be idempotent: the relay may re-deliver events in the
-// partial-progress case.
+// factory produces one Handler per worker (see WorkerContext). The handler must
+// be idempotent, as events may be re-delivered after partial progress.
 func NewTransientHandlerRelay(name string, store TransientStore, factory func(WorkerContext) Handler, opts ...RelayOption) Relay {
 	return newTransientRelay(name, store, handlerBatchStrategy{factory: factory}, opts...)
 }
 
-// NewTransientBatchHandlerRelay creates a Relay backed by BatchHandlers
-// that fetches events from store, dispatches them, and removes the entire
-// batch after the Commit barrier succeeds for every routed event.
+// NewTransientBatchHandlerRelay creates a Relay backed by BatchHandlers that
+// fetches events from store, dispatches them, and removes the whole batch once
+// the Commit barrier succeeds for every routed event. If factory is nil, the
+// first Run returns ErrNilFactory.
 //
-// factory produces one BatchHandler instance per worker; within a Run it
-// is invoked the first time a worker is handed an event, with a
-// WorkerContext. Workers that receive no events never invoke the factory.
-// With parallelism == 1 a single instance is built. If factory is nil,
-// the first Run returns ErrNilFactory.
-//
-// Strict all-or-nothing: any error leaves the batch in the store and
-// the next Run retries it.
+// factory produces one BatchHandler per worker (see WorkerContext). Processing
+// is strict all-or-nothing: any error leaves the batch in the store for the
+// next Run to retry.
 func NewTransientBatchHandlerRelay(name string, store TransientStore, factory func(WorkerContext) BatchHandler, opts ...RelayOption) Relay {
 	return newTransientRelay(name, store, batchHandlerBatchStrategy{factory: factory}, opts...)
 }
@@ -94,7 +83,15 @@ func (t *transientRelay) Run(ctx context.Context) (err error) {
 		if len(processed) == 0 {
 			return
 		}
-		if cleanUpErr := t.store.CleanUpEvents(ctx, processed); cleanUpErr != nil && err == nil {
+		// Detach only on shutdown (ctx already cancelled) so the cleanup still
+		// goes through; see detachedPersistCtx.
+		cleanupCtx := ctx
+		if ctx.Err() != nil {
+			var cancel context.CancelFunc
+			cleanupCtx, cancel = detachedPersistCtx(ctx)
+			defer cancel()
+		}
+		if cleanUpErr := t.store.CleanUpEvents(cleanupCtx, processed); cleanUpErr != nil && err == nil {
 			err = fmt.Errorf("failed to clean up events: %w", cleanUpErr)
 		}
 	}()

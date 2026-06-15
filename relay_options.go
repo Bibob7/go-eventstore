@@ -2,7 +2,7 @@ package eventstore
 
 import "time"
 
-// RelayOption is a functional option for configuring a PointerRelay.
+// RelayOption configures a relay at construction time.
 type RelayOption func(*relayConfig)
 
 // WithBatchSize sets the maximum number of events fetched per relay run.
@@ -29,19 +29,11 @@ func WithConditionalBatchDelay(d time.Duration) RelayOption {
 	}
 }
 
-// WithParallelism runs the relay across n worker goroutines. Each event
-// is routed to a worker by the configured PartitionStrategy (see
-// WithPartitionStrategy); the default strategy hashes StreamID with
-// fnv32a and reduces modulo n, so all events of a given stream are
-// processed sequentially on the same worker, preserving stream
-// ordering. n must be >= 1; values < 1 are clamped to 1.
-//
-// On a BatchHandler relay, the factory produces one BatchHandler per
-// worker and Commit fires once per worker per batch. On a plain-Handler
-// relay, the factory produces one Handler per worker; the relay is strict
-// all-or-nothing in the parallel path regardless of strategy (the
-// per-event partitioning makes partial per-worker progress unsafe to
-// merge into a single cursor update).
+// WithParallelism runs the relay across n worker goroutines (values < 1 are
+// clamped to 1). Each event is routed to a worker by the configured
+// PartitionStrategy; the default keeps all events of a stream on one worker,
+// preserving stream ordering. The factory produces one handler per worker, and
+// the parallel path is always strict all-or-nothing.
 func WithParallelism(n int) RelayOption {
 	return func(c *relayConfig) {
 		if n < 1 {
@@ -51,16 +43,9 @@ func WithParallelism(n int) RelayOption {
 	}
 }
 
-// WithPartitionStrategy replaces the strategy used to route events to
-// workers in the parallel path. The default (DefaultPartitionStrategy)
-// hashes StreamID with fnv32a.
-//
-// If you require sequential processing for a set of related events
-// (e.g. all events in a stream), provide a strategy that routes those
-// related events to the same worker index for a given workerCount.
-//
-// Passing nil falls back to DefaultPartitionStrategy so the option is
-// always safe to apply.
+// WithPartitionStrategy replaces the strategy that routes events to workers in
+// the parallel path. To process related events sequentially, route them to the
+// same worker index. Passing nil falls back to DefaultPartitionStrategy.
 func WithPartitionStrategy(s PartitionStrategy) RelayOption {
 	return func(c *relayConfig) {
 		if s == nil {

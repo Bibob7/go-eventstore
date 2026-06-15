@@ -63,22 +63,23 @@ jobs:
   benchmark-compare:
     name: Benchmark Regression
     runs-on: ubuntu-latest
-    # Only meaningful on PRs: compares the PR head against its base branch
-    # on the same runner so the numbers are directly comparable.
+    # Only meaningful on PRs: compares the PR head against its base branch.
+    # Runs are interleaved (head/base alternating) so both see the same
+    # shared-runner drift and benchstat compares like with like.
     if: github.event_name == 'pull_request'
     permissions:
       contents: read
       pull-requests: write
     env:
       # Tunables. BENCH_COUNT must be >= 6 for benchstat to compute a
-      # confidence interval. BENCH_PKG limits the run to the package that
-      # actually holds benchmarks (keeps the job to a few minutes).
-      BENCH_COUNT: "6"
+      # confidence interval; more samples damp shared-runner noise. BENCH_PKG
+      # limits the run to the package that actually holds benchmarks.
+      BENCH_COUNT: "10"
       BENCH_TIME: "1s"
       BENCH_PKG: "."
       # Fail the job when a benchmark is statistically significantly slower
       # (benchstat p < 0.05) than base by more than this percent (time/op).
-      REGRESSION_PCT: "15"
+      REGRESSION_PCT: "20"
     steps:
       - uses: actions/checkout@v6
         with:
@@ -92,21 +93,23 @@ jobs:
       - name: Install benchstat
         run: go install golang.org/x/perf/cmd/benchstat@latest
 
-      - name: Benchmark PR head
-        run: |
-          go test -run=^$ -bench=. -benchmem \
-            -benchtime="${BENCH_TIME}" -count="${BENCH_COUNT}" "${BENCH_PKG}" \
-            | tee head.txt
-
-      - name: Benchmark base (${{ github.event.pull_request.base.ref }})
+      - name: Build benchmark binaries (head and base)
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
+          go test -run=^$ -c -o "${RUNNER_TEMP}/head.test" "${BENCH_PKG}"
           git checkout --quiet --detach "${BASE_SHA}"
-          go test -run=^$ -bench=. -benchmem \
-            -benchtime="${BENCH_TIME}" -count="${BENCH_COUNT}" "${BENCH_PKG}" \
-            | tee base.txt
+          go test -run=^$ -c -o "${RUNNER_TEMP}/base.test" "${BENCH_PKG}"
           git checkout --quiet --force -
+
+      - name: Interleaved benchmark
+        run: |
+          : > head.txt
+          : > base.txt
+          for _ in $(seq 1 "${BENCH_COUNT}"); do
+            "${RUNNER_TEMP}/head.test" -test.run='^$' -test.bench=. -test.benchmem -test.benchtime="${BENCH_TIME}" -test.count=1 >> head.txt
+            "${RUNNER_TEMP}/base.test" -test.run='^$' -test.bench=. -test.benchmem -test.benchtime="${BENCH_TIME}" -test.count=1 >> base.txt
+          done
 
       - name: Compare with benchstat
         run: |
@@ -140,26 +143,29 @@ jobs:
               await github.rest.issues.createComment({ owner, repo, issue_number, body });
             }
 
-      - name: Gate on time/op regressions
+      - name: Gate on time/op regression
         run: |
+          # Gate on the suite geomean of the sec/op table, not individual
+          # benchmarks: per-benchmark deltas are too noisy on shared runners
+          # (the per-bench numbers are still posted in the PR comment). B/op
+          # and allocs/op are reported but not gated.
           awk -F, -v thresh="${REGRESSION_PCT}" '
-            # Only inspect the sec/op table; B/op and allocs/op are reported
-            # in the PR comment but not gated here.
             $2 == "sec/op" { insec = 1; next }
             insec && NF < 2 { insec = 0 }
-            insec && $1 != "geomean" && $6 ~ /^\+[0-9]/ {
+            insec && $1 == "geomean" {
               pct = $6; gsub(/[+%]/, "", pct);
-              if (pct + 0 > thresh + 0) {
-                printf "  %-55s %s slower\n", $1, $6;
+              if (pct ~ /^[0-9.]+$/ && pct + 0 > thresh + 0) {
+                printf "  geomean %s slower\n", $6;
                 bad = 1;
               }
+              insec = 0;
             }
             END {
               if (bad) {
-                print "::error::Benchmark time/op regression(s) exceed " thresh "% (vs base, p < 0.05)";
+                print "::error::Benchmark suite geomean time/op regression exceeds " thresh "% (vs base)";
                 exit 1;
               }
-              print "No significant time/op regression beyond " thresh "%.";
+              print "No geomean time/op regression beyond " thresh "%.";
             }
           ' comparison.csv
 

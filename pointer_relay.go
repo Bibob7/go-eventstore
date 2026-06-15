@@ -9,11 +9,11 @@ import (
 )
 
 const (
-	// DefaultWaitTime is the delay applied by a delayedRelay between batches
-	// when ErrEventNotReadyToProcess is returned.
+	// DefaultWaitTime is the delay applied between batches when
+	// ErrEventNotReadyToProcess is returned.
 	DefaultWaitTime = 5 * time.Second
-	// DefaultBatchSize is the number of events fetched per relay run when no
-	// explicit batch size is configured via WithBatchSize.
+	// DefaultBatchSize is the number of events fetched per relay run when none
+	// is configured via WithBatchSize.
 	DefaultBatchSize = 100
 )
 
@@ -23,10 +23,8 @@ var (
 	ErrIncrementIDConflict = errors.New("increment id conflict")
 )
 
-// pointerRelay is the cursor-based Relay implementation backed by a
-// PointerStore + IncrementIDStore. It is agnostic to the handler kind:
-// the batchStrategy chosen at construction time (plain Handler or
-// BatchHandler) determines how each batch is dispatched.
+// pointerRelay is the cursor-based Relay backed by a PointerStore and
+// IncrementIDStore. The strategy chosen at construction dispatches each batch.
 type pointerRelay struct {
 	relayConfig
 	name             string
@@ -63,49 +61,29 @@ func newPointerRelay(name string, store PointerStore, incrementIDStore Increment
 	return relay
 }
 
-// NewPointerHandlerRelay creates a cursor-based Relay that reads from
-// store and tracks its position in incrementIDStore. The name must be
-// unique across all relays sharing the same IncrementIDStore.
+// NewPointerHandlerRelay creates a cursor-based Relay that reads from store and
+// tracks its position in incrementIDStore. The name must be unique across all
+// relays sharing the same IncrementIDStore. If factory is nil, the first Run
+// returns ErrNilFactory.
 //
-// factory produces one Handler instance per worker; within a Run it is
-// invoked the first time a worker is handed an event, with a WorkerContext
-// identifying that worker (ID in [0, Count)), so any per-worker state is
-// fresh and not shared. Workers that receive no events never invoke the
-// factory. With parallelism == 1 a single instance is built. If factory
-// is nil, the first Run returns ErrNilFactory.
-//
-// Cursor semantics: partial progress is allowed in the sequential path
-// (parallelism <= 1). If a Handle call fails mid-batch, the cursor
-// advances up to the last successfully processed event so the next Run
-// resumes from there. In the parallel path (parallelism > 1) the relay
-// is strict all-or-nothing because the per-event partitioning makes
-// per-worker partial progress unsafe to merge into a single cursor
-// update.
-//
-// The handler must be idempotent: the relay may re-deliver events in the
-// partial-progress case (e.g. when the context is cancelled between two
-// Handle calls and the cursor was advanced to the last successful event
-// on the previous Run).
+// factory produces one Handler per worker (see WorkerContext). The sequential
+// path (parallelism <= 1) allows partial progress: a mid-batch failure advances
+// the cursor to the last handled event. The parallel path is strict
+// all-or-nothing. Either way the handler must be idempotent, as events may be
+// re-delivered after partial progress.
 func NewPointerHandlerRelay(name string, store PointerStore, incrementIDStore IncrementIDStore, factory func(WorkerContext) Handler, opts ...RelayOption) Relay {
 	return newPointerRelay(name, store, incrementIDStore, handlerBatchStrategy{factory: factory}, opts...)
 }
 
 // NewPointerBatchHandlerRelay creates a cursor-based Relay backed by
 // BatchHandlers that reads from store and tracks its position in
-// incrementIDStore. The name must be unique across all relays sharing
-// the same IncrementIDStore.
+// incrementIDStore. The name must be unique across all relays sharing the same
+// IncrementIDStore. If factory is nil, the first Run returns ErrNilFactory.
 //
-// factory produces one BatchHandler instance per worker; within a Run it
-// is invoked the first time a worker is handed an event, with a
-// WorkerContext identifying that worker, so any per-worker state (e.g. an
-// AMQP channel) is fresh and not shared. Workers that receive no events
-// never invoke the factory. With parallelism == 1 a single instance is
-// built. If factory is nil, the first Run returns ErrNilFactory.
-//
-// Strict all-or-nothing: the cursor is advanced only when the entire
-// batch (Handle for every event plus Commit for every BatchHandler)
-// completed successfully. Any failure leaves the cursor where it was
-// and the next Run retries the same batch.
+// factory produces one BatchHandler per worker (see WorkerContext). Processing
+// is strict all-or-nothing: the cursor advances only after Handle for every
+// event and Commit for every BatchHandler succeed, otherwise the next Run
+// retries the same batch.
 func NewPointerBatchHandlerRelay(name string, store PointerStore, incrementIDStore IncrementIDStore, factory func(WorkerContext) BatchHandler, opts ...RelayOption) Relay {
 	return newPointerRelay(name, store, incrementIDStore, batchHandlerBatchStrategy{factory: factory}, opts...)
 }
@@ -140,7 +118,15 @@ func (p *pointerRelay) Run(ctx context.Context) (err error) {
 			slog.Debug("No events relayed", "name", p.name, "last_increment_id", lastIncrementID)
 			return
 		}
-		if setErr := p.incrementIDStore.SetIncrementID(ctx, p.name, lastIncrementID, newLastIncrementID); setErr != nil && err == nil {
+		// Detach only on shutdown (ctx already cancelled) so the cursor write
+		// still goes through; see detachedPersistCtx.
+		persistCtx := ctx
+		if ctx.Err() != nil {
+			var cancel context.CancelFunc
+			persistCtx, cancel = detachedPersistCtx(ctx)
+			defer cancel()
+		}
+		if setErr := p.incrementIDStore.SetIncrementID(persistCtx, p.name, lastIncrementID, newLastIncrementID); setErr != nil && err == nil {
 			err = fmt.Errorf("failed to set new increment id: %w", setErr)
 		}
 	}()

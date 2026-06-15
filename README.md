@@ -137,6 +137,8 @@ The relay is built around a *factory*: `func(eventstore.WorkerContext) eventstor
 
 A `TransientRelay` deletes each event from the store after all handlers have processed it successfully. Useful when the outbox should not grow indefinitely and no separate cleanup job is desired.
 
+Because events are deleted, a transient relay must own its table exclusively: other relays (or aggregate streams) on the same table would lose events. `FetchBatchOfEvents` performs no locking, so do not run multiple instances of the same transient relay against one store — scale within a single instance via `WithParallelism(n)` instead.
+
 ```go
 relay := eventstore.NewTransientHandlerRelay(
     "order-relay",
@@ -222,13 +224,64 @@ The types below are the building blocks of the library. They combine into an app
 
 ### Events
 
-**DomainEvent** — the write model you implement and pass to `Store.Append`. It is a [domain event](https://martinfowler.com/eaaDev/DomainEvent.html): it exposes the event's `ID`, `StreamID`, `EventType`, and `OccurredAt`; how the payload is serialized is up to the `Store` implementation.
+**DomainEvent** — the write model you implement and pass to a store's append method. It is a [domain event](https://martinfowler.com/eaaDev/DomainEvent.html): it exposes the event's `ID`, `StreamID`, `EventType`, and `OccurredAt`; how the payload is serialized is up to the `Store` implementation. Optional cross-cutting metadata is exposed via `Metadata()` — see [Metadata](#metadata).
 
-**StoredEvent** — the read model delivered to handlers. It carries the database-assigned `IncrementID` (the relay's cursor position), the `StreamID` (used to partition events across parallel workers), the serialized `Payload`, and the same `EventType` / `OccurredAt` metadata.
+The event does **not** carry its position in the stream; per-stream versioning is enforced by `StreamStore.AppendWithExpectedVersion`, which takes the expected position as a separate argument. Aggregates that reload from history get the position from the last `StoredEvent.StreamVersion` they replayed.
+
+**StoredEvent** — the read model delivered to handlers. It carries the database-assigned `IncrementID` (the relay's cursor position), the `StreamID` (used to partition events across parallel workers), the serialized `Payload`, the same `EventType` / `OccurredAt` metadata, the optional `Metadata` map, and the per-stream `StreamVersion` that aggregates use to reconstruct themselves (`-1` for unversioned events written via the plain `Store.Append` path).
+
+#### Metadata
+
+Domain events may carry cross-cutting `Metadata` as a `map[string]string`, attached via the `Metadata()` method. Use it for correlation IDs, causation chains, distributed-tracing IDs, tenancy, or any other key/value you want to propagate alongside an event.
+
+Reserved keys (by convention — the store does not enforce them):
+
+| Key | Purpose |
+|---|---|
+| `correlation_id` | links all events triggered by a single incoming request or command, propagated across service boundaries |
+| `causation_id`   | the ID of the event that *caused* this event — i.e. the last event in the chain this one reacts to |
+| `trace_id`       | OTel/distributed-tracing trace ID, for log correlation |
+
+Custom keys are welcome. `nil` and an empty map are treated as equivalent and persisted as SQL `NULL` (no JSON overhead per row).
+
+Metadata is opt-in via the `MetadataProvider` interface, which the store checks with a type assertion at append time. Events that have no metadata simply don't implement it — nothing to embed, nothing to override. To attach metadata, define the `Metadata()` method:
+
+```go
+func (e OrderPlaced) Metadata() eventstore.Metadata {
+    return eventstore.Metadata{
+        eventstore.MetadataKeyCorrelationID: e.correlationID,
+    }
+}
+```
+
+#### Stream versioning
+
+Streams are versioned per `(stream_id, stream_version)`. The version is *assigned by the store*, not carried on the event — this matches the [EventStoreDB `expectedVersion`](https://docs.kurrent.io/clients/tcp/dotnet/21.2/appending.md) and [Axon `expectedVersion`](https://docs.axoniq.io) pattern. Use `StreamStore.AppendWithExpectedVersion` to append events with an optimistic-concurrency check:
+
+```go
+err := store.AppendWithExpectedVersion(ctx, orderID, -1, evt)
+//                                                    ↑
+//                                "stream must currently be empty"
+// On success the event is persisted at stream_version 0, 1, 2, … in batch order.
+```
+
+`expectedVersion == -1` means the stream must be empty (the create path); `expectedVersion == N` means the stream's current head must be exactly `N` (the case after replaying `N+1` events during Load).
+
+Conflicts are enforced in two layers. A version pre-check runs in the same transaction as the insert and rejects stale `expectedVersion`s. Because that pre-check is a non-locking snapshot read, two concurrent writers can both pass it — the `UNIQUE (stream_id, stream_version)` index then rejects the loser's insert. Either way the loser sees `ErrStreamVersionConflict` and reloads; two writers can never both append version `5`. The event's own payload never carries a version field, so there is no way for a caller to "forget" the version: it is the parameter that travels with the append.
+
+A `DomainEvent` does not know its position. To reconstruct an aggregate, use `StreamReader.ReadStream(streamID, fromVersion, limit)` and track the last `StoredEvent.StreamVersion` you replayed — that is the `expectedVersion` you pass to the next `AppendWithExpectedVersion`. The inclusive `fromVersion` semantics let you resume a rebuild from a snapshot's `version + 1` without an off-by-one dance.
+
+For the plain outbox / projection use case (no aggregates, no per-stream ordering), use the simpler `Store.Append` path. It just inserts events in the order received and does not enforce per-stream ordering — the right tool for relays that just need durable, ordered event delivery.
+
+The two write paths share a table but are separate worlds: events written via `Store.Append` carry no stream version (persisted as SQL `NULL`, delivered to relay handlers with `StreamVersion == -1`). They are never returned by `ReadStream` and do not count toward `LatestStreamVersion`, so they cannot interfere with a stream's optimistic-concurrency contract. Relays see events from both paths.
+
+> **Don't delete an aggregate's history.** `TransientRelay` and `CleanUpToIncluding` delete events. Run them only against dedicated outbox tables, never against a table that holds event-sourced streams — and when several pointer relays share a table, clean up only below the *minimum* cursor across all of them.
 
 ### Stores
 
-**Store** — the minimal write interface: `Append(ctx, ...DomainEvent)`. Every backend implements at least this.
+**Store** — the minimal write interface: `Append(ctx, ...DomainEvent)`. Every backend implements at least this. This is the plain append-only-log path: events are inserted in the order received and no per-stream ordering is enforced. The right tool for outbox / projection workloads that don't model aggregates.
+
+**StreamStore** — write interface for per-stream appends with optimistic concurrency control: `AppendWithExpectedVersion(ctx, streamID, expectedVersion, ...DomainEvent)`. The store atomically verifies that the stream's current head equals `expectedVersion` (or `-1` for "stream must be empty") and assigns the new events consecutive stream versions starting at `expectedVersion + 1`. The right tool for the event-sourced aggregate pattern (Load → Decide → Save).
 
 **PointerStore** — cursor-based reads: `FetchBatchOfEventsSince(lastIncrementID, limit)` returns events ordered by ascending `IncrementID`. Backs the pointer relays. The MySQL implementation applies gap detection so events are not delivered out of order while concurrent transactions are still in flight.
 
@@ -237,6 +290,10 @@ The types below are the building blocks of the library. They combine into an app
 **IncrementIDStore** — persists the last successfully processed `IncrementID` per relay (keyed by relay name), enabling resumption after restarts. `SetIncrementID` takes an expected previous value so implementations can enforce [optimistic concurrency control](https://en.wikipedia.org/wiki/Optimistic_concurrency_control) (see `ErrIncrementIDConflict`).
 
 **CleanUpToStore** — bulk outbox cleanup: `CleanUpToIncluding(incrementID)` removes every event at or below a position in one call. Useful when a relay has acknowledged a cursor and everything up to it can be discarded.
+
+**StreamReader** — stream-scoped reads: `ReadStream(streamID, fromVersion, limit)` returns events for a single stream ordered by ascending `StreamVersion`, starting at `fromVersion` *inclusive* (so `fromVersion=0` returns the first event of the stream). Use it to reconstruct aggregates or to drive per-stream projections.
+
+**StreamVersionReader** — cheap pre-check: `LatestStreamVersion(streamID)` returns the highest `StreamVersion` for a stream (or `-1` if the stream is empty) without loading any events. Use it to compute `expectedVersion` when you have not just loaded the stream (e.g. snapshot-resume, one-shot appenders), or for monitoring / diagnostics. Implementations are independent of `StreamReader` — declare a dependency on the one you actually need.
 
 ### Processing
 
@@ -254,6 +311,10 @@ The types below are the building blocks of the library. They combine into an app
 
 **ErrIncrementIDConflict** — returned by an `IncrementIDStore` when the stored position changed between read and write, so a concurrent relay can detect it lost the optimistic-locking race.
 
+**ErrStreamVersionConflict** — returned by `StreamStore.AppendWithExpectedVersion` when the stream's current head does not match `expectedVersion`, or when a concurrent writer won the race for the same version (detected via the `UNIQUE (stream_id, stream_version)` index). `errors.As` against `*eventstore.StreamVersionConflictError` exposes the conflicting `StreamID`, `EventID`, and the `Expected` vs. `Got` positions. Aggregates use this to reload and retry.
+
+**ErrInvalidStreamAppend** — returned by `StreamStore.AppendWithExpectedVersion` when the call itself is malformed: an event in the batch belongs to a different stream than the `streamID` parameter, or `expectedVersion` is below the `-1` sentinel. These are programming errors, not concurrency conflicts — retry loops must not catch them.
+
 **ErrNilFactory** — returned from `Run` when a relay was constructed with a nil handler factory.
 
 ## Examples
@@ -264,11 +325,12 @@ Runnable examples live under [`integration/mysql/example`](integration/mysql/exa
 # from integration/mysql
 docker compose up --wait
 
-go run ./example/append/          # Appending events with and without a transaction
-go run ./example/outbox/          # Transactional outbox pattern (write + relay in one tx)
-go run ./example/gap_detection/   # Two interleaved gaps: relay resumes in order, drops nothing
-go run ./example/pointer_relay/   # PointerRelay with cursor-based position tracking
-go run ./example/transient_relay/ # TransientRelay that deletes events after processing
+go run ./example/append/              # Appending events with and without a transaction
+go run ./example/outbox/              # Transactional outbox pattern (write + relay in one tx)
+go run ./example/gap_detection/       # Two interleaved gaps: relay resumes in order, drops nothing
+go run ./example/pointer_relay/       # PointerRelay with cursor-based position tracking
+go run ./example/transient_relay/     # TransientRelay that deletes events after processing
+go run ./example/repository_aggregate # Event-sourced aggregate: Load → Decide → Save, conflict retry
 ```
 
 ## Running integration tests

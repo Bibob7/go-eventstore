@@ -52,6 +52,11 @@ func (m *mockIncrementIDStore) GetIncrementID(ctx context.Context, relayName str
 }
 
 func (m *mockIncrementIDStore) SetIncrementID(ctx context.Context, relayName string, expectedPreviousID int64, incrementID int64) error {
+	// Mirror a real database: refuse to execute on a cancelled context so
+	// tests can prove the relay persists the cursor on a detached context.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if m.setErr != nil {
 		return m.setErr
 	}
@@ -298,6 +303,59 @@ func TestPointerRelay_BatchDelayOptions(t *testing.T) {
 
 			if elapsed < tc.minElapsed {
 				t.Errorf("expected at least %v elapsed, got %v", tc.minElapsed, elapsed)
+			}
+		})
+	}
+}
+
+// TestPointerRelay_PersistsCursorOnCancelledContext proves that a graceful
+// shutdown which cancels the run context still records the progress of
+// already-handled events. The mock IncrementIDStore honours ctx
+// cancellation like a real database, so this test fails if the relay
+// reused the cancelled ctx for the cursor write instead of a detached one.
+func TestPointerRelay_PersistsCursorOnCancelledContext(t *testing.T) {
+	tests := []struct {
+		name       string
+		events     []StoredEvent
+		cancelOn   int // cancel the run context after the Nth handled event
+		wantLastID int64
+		wantErr    error
+	}{
+		{
+			name:       "cancellation after the whole batch still persists the cursor",
+			events:     newEvents(1, 2, 3),
+			cancelOn:   3,
+			wantLastID: 3,
+			wantErr:    nil,
+		},
+		{
+			name:       "cancellation mid-batch persists the partial progress",
+			events:     newEvents(1, 2, 3),
+			cancelOn:   2,
+			wantLastID: 2,
+			wantErr:    context.Canceled,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &mockPointerStore{events: tc.events}
+			inc := newMockIncrementIDStore()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			h := &cancelOnNthHandler{n: tc.cancelOn, cancel: cancel}
+			relay := NewPointerHandlerRelay("cancel-relay", store, inc, func(WorkerContext) Handler { return h })
+
+			err := relay.Run(ctx)
+
+			if tc.wantErr == nil && err != nil {
+				t.Fatalf("expected nil error, got %v", err)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("expected %v, got %v", tc.wantErr, err)
+			}
+			lastID, _ := inc.GetIncrementID(context.Background(), "cancel-relay")
+			if lastID != tc.wantLastID {
+				t.Errorf("expected cursor at %d, got %d", tc.wantLastID, lastID)
 			}
 		})
 	}
