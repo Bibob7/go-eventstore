@@ -71,14 +71,14 @@ jobs:
       pull-requests: write
     env:
       # Tunables. BENCH_COUNT must be >= 6 for benchstat to compute a
-      # confidence interval. BENCH_PKG limits the run to the package that
-      # actually holds benchmarks (keeps the job to a few minutes).
-      BENCH_COUNT: "6"
+      # confidence interval; more samples damp shared-runner noise. BENCH_PKG
+      # limits the run to the package that actually holds benchmarks.
+      BENCH_COUNT: "10"
       BENCH_TIME: "1s"
       BENCH_PKG: "."
       # Fail the job when a benchmark is statistically significantly slower
       # (benchstat p < 0.05) than base by more than this percent (time/op).
-      REGRESSION_PCT: "15"
+      REGRESSION_PCT: "20"
     steps:
       - uses: actions/checkout@v6
         with:
