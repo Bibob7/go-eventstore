@@ -29,15 +29,10 @@ type EventStore struct {
 	tableName string
 }
 
-// NewEventStore constructs an EventStore bound to the given database and
-// table. The table name must be a valid SQL identifier; otherwise this
-// function panics.
-//
-// The returned value satisfies eventstore.Store (plain append-only log),
-// eventstore.StreamStore (optimistic-concurrency appends with a per-stream
-// expectedVersion), eventstore.StreamReader (single-stream reads), and
-// eventstore.StreamVersionReader (cheap latest-version lookup). Pick the
-// interface that matches your use case and depend on it.
+// NewEventStore constructs an EventStore bound to the given database and table.
+// It panics if tableName is not a valid SQL identifier. The returned value
+// satisfies eventstore.Store, StreamStore, StreamReader, and
+// StreamVersionReader; depend on whichever fits your use case.
 func NewEventStore(db *sql.DB, tableName string) *EventStore {
 	mustValidateIdentifier("tableName", tableName)
 	return &EventStore{
@@ -46,18 +41,9 @@ func NewEventStore(db *sql.DB, tableName string) *EventStore {
 	}
 }
 
-// Append persists one or more domain events to the event store, optionally
-// using a transaction if present in the context. It is the plain
-// "append-only log" path: events are inserted in the order received and
-// the store does not enforce any per-stream ordering or uniqueness of
-// stream_version. Use this for outbox / projection workloads.
-//
-// For the aggregate-style Load → Decide → Save pattern with optimistic
-// concurrency control per stream, use AppendWithExpectedVersion
-// (StreamStore interface) instead.
-//
-// Returns an error if event marshaling fails or the underlying SQL
-// execution fails.
+// Append persists the given events as a plain append-only log, joining the
+// caller's transaction from ctx if present. For per-stream optimistic
+// concurrency use AppendWithExpectedVersion instead.
 func (s *EventStore) Append(ctx context.Context, domainEvents ...eventstore.DomainEvent) error {
 	if len(domainEvents) == 0 {
 		return nil
@@ -73,31 +59,20 @@ func (s *EventStore) Append(ctx context.Context, domainEvents ...eventstore.Doma
 	return WithTransaction(ctx, s.db, run, nil)
 }
 
-// AppendWithExpectedVersion atomically appends events to the stream
-// identified by streamID and verifies that the stream's current head
-// equals expectedVersion before any insert happens. On success the
-// events are persisted with consecutive stream versions starting at
-// expectedVersion + 1. It satisfies the eventstore.StreamStore interface.
+// AppendWithExpectedVersion atomically verifies that the stream's head equals
+// expectedVersion and appends the events at consecutive versions from
+// expectedVersion + 1. It satisfies eventstore.StreamStore.
 //
-// expectedVersion semantics:
-//   - -1: the stream MUST be empty. Use this on the create path.
-//   - N ≥ 0: the stream's current head MUST be exactly N. This is the
-//     case after replaying N+1 events during Load.
+// expectedVersion of -1 requires an empty stream (the create path); N >= 0
+// requires the head to be exactly N. A malformed call (wrong streamID or
+// expectedVersion < -1) returns an error wrapping
+// eventstore.ErrInvalidStreamAppend.
 //
-// All events in the batch MUST have StreamID() == streamID, and
-// expectedVersion MUST be >= -1; otherwise an error wrapping
-// eventstore.ErrInvalidStreamAppend is returned (a programming error,
-// distinct from a concurrency conflict so retry loops don't catch it).
-//
-// Concurrency is enforced in two layers. The version pre-check runs
-// inside the same transaction as the insert (caller-supplied via
-// WithTx/GetTx, or store-owned) and reports a stale expectedVersion as a
-// *StreamVersionConflictError wrapping ErrStreamVersionConflict. Because
-// that pre-check is a non-locking snapshot read, two concurrent writers
-// can both pass it — the UNIQUE index on (stream_id, stream_version) then
-// rejects the loser's insert, which is reported as the same
-// *StreamVersionConflictError. Either way the transaction is rolled back
-// and the caller can reload and retry.
+// The pre-check runs in the same transaction as the insert (caller-supplied via
+// WithTx/GetTx, or store-owned). Because it is a non-locking read, a concurrent
+// writer may also pass it; the UNIQUE index on (stream_id, stream_version) then
+// rejects the loser. Either way a conflict is reported as a
+// *StreamVersionConflictError and the transaction is rolled back.
 func (s *EventStore) AppendWithExpectedVersion(
 	ctx context.Context,
 	streamID uuid.UUID,
@@ -111,10 +86,8 @@ func (s *EventStore) AppendWithExpectedVersion(
 	if len(domainEvents) == 0 {
 		return nil
 	}
-	// Every event in the batch must belong to the same stream; this is
-	// part of the StreamStore contract. A mismatch is a programming error,
-	// not a concurrency conflict — report it as such so aggregate retry
-	// loops don't reload-and-retry on a bug.
+	// All events must belong to streamID (StreamStore contract); a mismatch is
+	// a programming error, not a concurrency conflict.
 	for _, ev := range domainEvents {
 		if ev.StreamID() != streamID {
 			return fmt.Errorf("%w: event %s belongs to stream %s, not %s",
@@ -154,23 +127,17 @@ func (s *EventStore) AppendWithExpectedVersion(
 
 // mapDuplicateVersionError translates a duplicate-key violation on the
 // (stream_id, stream_version) UNIQUE index into a *StreamVersionConflictError.
-//
-// The MAX(stream_version) pre-check in AppendWithExpectedVersion is a
-// non-locking snapshot read, so two concurrent transactions can both pass it
-// and race to insert the same version. The UNIQUE constraint is what actually
-// guarantees the optimistic-concurrency contract: the loser's insert fails
-// with MySQL error 1062, which this function reports as the same conflict the
-// pre-check would have raised.
+// The constraint, not the non-locking pre-check in AppendWithExpectedVersion,
+// is what ultimately enforces the optimistic-concurrency contract when two
+// writers race to insert the same version.
 func (s *EventStore) mapDuplicateVersionError(ctx context.Context, err error, streamID uuid.UUID, expectedVersion int, firstEventID uuid.UUID) error {
 	var mysqlErr *gomysql.MySQLError
 	if !errors.As(err, &mysqlErr) || mysqlErr.Number != mysqlErrDuplicateKey {
 		return err
 	}
-	// Best-effort read of the actual head for diagnostics. It must run on a
-	// fresh connection: inside the failed transaction the REPEATABLE READ
-	// snapshot would not see the winner's commit. The duplicate key proves
-	// the head is at least expectedVersion+1, so that is the fallback when
-	// the read fails.
+	// Best-effort read of the actual head for diagnostics, on a fresh connection
+	// (the failed transaction's snapshot can't see the winner's commit). The
+	// duplicate key proves the head is at least expectedVersion+1.
 	got, readErr := s.LatestStreamVersion(ctx, streamID)
 	if readErr != nil {
 		got = expectedVersion + 1
@@ -183,10 +150,9 @@ func (s *EventStore) mapDuplicateVersionError(ctx context.Context, err error, st
 	}
 }
 
-// currentStreamVersion returns the highest stream_version persisted for
-// streamID, or -1 if the stream is empty. Runs inside the caller's
-// transaction so the read and the subsequent insert are serialized
-// against concurrent writers.
+// currentStreamVersion returns the highest stream_version for streamID, or -1
+// if the stream is empty. It runs inside the caller's transaction so the read
+// and the subsequent insert are serialized against concurrent writers.
 func (s *EventStore) currentStreamVersion(ctx context.Context, tx *sql.Tx, streamID uuid.UUID) (int, error) {
 	binStreamID, err := streamID.MarshalBinary()
 	if err != nil {
@@ -204,13 +170,11 @@ func (s *EventStore) currentStreamVersion(ctx context.Context, tx *sql.Tx, strea
 	return int(maxVersion.Int64), nil
 }
 
-// insertEvents builds and executes the multi-row INSERT for the batch.
-// When versions is non-nil it must have the same length as domainEvents
-// and the i-th version is assigned to the i-th event (StreamStore path).
-// When versions is nil, every row gets stream_version = NULL (Store path —
-// the plain append-only log that does not enforce per-stream ordering).
-// NULL keeps unversioned rows out of the (stream_id, stream_version)
-// UNIQUE index, so the two write paths cannot collide.
+// insertEvents builds and executes the multi-row INSERT for the batch. When
+// versions is non-nil it must match domainEvents in length and supplies each
+// row's stream_version (StreamStore path); when nil, every row gets NULL (plain
+// Append path), keeping unversioned rows out of the (stream_id, stream_version)
+// UNIQUE index so the two write paths cannot collide.
 func (s *EventStore) insertEvents(ctx context.Context, tx *sql.Tx, domainEvents []eventstore.DomainEvent, versions []int) error {
 	if versions != nil && len(versions) != len(domainEvents) {
 		return fmt.Errorf("insertEvents: versions length %d != events length %d", len(versions), len(domainEvents))
@@ -250,11 +214,9 @@ func (s *EventStore) insertEvents(ctx context.Context, tx *sql.Tx, domainEvents 
 		}
 		valuesArgs[j+3] = domainEvent.EventType()
 		valuesArgs[j+4] = eventPayloadJsonString
-		// Always persist in UTC so reads are timezone-stable, independent of
-		// the producer's local timezone or driver configuration.
+		// Persist in UTC so reads are timezone-stable.
 		valuesArgs[j+5] = domainEvent.OccurredAt().UTC().Format(occurredAtFormat)
-		// Metadata: nil and empty maps both map to SQL NULL so we don't pay
-		// for a JSON round-trip on every row when no metadata is attached.
+		// nil and empty metadata both map to NULL, avoiding a JSON round-trip.
 		var md eventstore.Metadata
 		if mp, ok := domainEvent.(eventstore.MetadataProvider); ok {
 			md = mp.Metadata()
@@ -278,14 +240,15 @@ func (s *EventStore) insertEvents(ctx context.Context, tx *sql.Tx, domainEvents 
 	return err
 }
 
-// FetchBatchOfEvents fetches a batch of events from the event store starting with the smallest incrementID.
-// Unlike FetchBatchOfEventsSince, no gap detection is applied because this method is intended for
-// transient relay usage where processed events are deleted, making ID gaps expected and harmless.
+// FetchBatchOfEvents fetches up to limit events starting from the smallest
+// IncrementID. No gap detection is applied: it is meant for transient relays
+// that delete processed events, so ID gaps are expected.
 func (s *EventStore) FetchBatchOfEvents(ctx context.Context, limit int) ([]eventstore.StoredEvent, error) {
 	return s.fetchBatchOfEvents(ctx, -1, limit)
 }
 
-// FetchBatchOfEventsSince fetches a batch of events from the event store since the last incrementID.
+// FetchBatchOfEventsSince fetches up to limit events after lastIncrementID,
+// applying gap detection.
 func (s *EventStore) FetchBatchOfEventsSince(ctx context.Context, lastIncrementID int64, limit int) ([]eventstore.StoredEvent, error) {
 	storedEvents, err := s.fetchBatchOfEvents(ctx, lastIncrementID, limit)
 	if err != nil {
@@ -320,14 +283,10 @@ func (s *EventStore) fetchBatchOfEvents(ctx context.Context, lastIncrementID int
 	return s.transformToStoredEvents(rows)
 }
 
-// LatestStreamVersion returns the highest StreamVersion persisted for
-// streamID, or -1 if no events exist for that stream. It satisfies the
-// eventstore.StreamVersionReader interface and issues a single aggregate
-// query (SELECT MAX(stream_version) WHERE stream_id = ?), so it is the
-// cheap alternative to ReadStream whenever the caller only needs the
-// position — e.g. as a pre-check before Append to detect concurrent
-// writers without deserializing the full history, or to compute
-// fromVersion = lastVersion + 1 when resuming from a snapshot.
+// LatestStreamVersion returns the highest StreamVersion for streamID, or -1 if
+// the stream has no events. It satisfies eventstore.StreamVersionReader with a
+// single SELECT MAX(stream_version), the cheap alternative to ReadStream when
+// only the position is needed.
 func (s *EventStore) LatestStreamVersion(ctx context.Context, streamID uuid.UUID) (int, error) {
 	binStreamID, err := streamID.MarshalBinary()
 	if err != nil {
@@ -340,24 +299,18 @@ func (s *EventStore) LatestStreamVersion(ctx context.Context, streamID uuid.UUID
 		return 0, err
 	}
 	if !maxVersion.Valid {
-		// No row matched — the stream is empty. -1 is the documented
-		// sentinel for "fresh stream" so callers can compute the next
-		// expected version as last + 1.
+		// No row matched: the stream is empty. -1 is the sentinel so callers
+		// compute the next version as last + 1.
 		return -1, nil
 	}
 	return int(maxVersion.Int64), nil
 }
 
-// ReadStream returns up to limit events for the given stream, ordered by
-// StreamVersion ascending, starting at fromVersion inclusive. It satisfies
-// the eventstore.StreamReader interface. Unversioned events written via
-// the plain Append path (stream_version NULL) are not part of any stream
-// and are never returned.
-//
-// At most limit events are returned: a stream longer than limit is
-// truncated. To load an entire stream regardless of length (e.g. to
-// reconstruct an aggregate), use eventstore.ReadStreamAll, which pages
-// through this method until the stream is exhausted.
+// ReadStream returns up to limit events for the stream, ordered by
+// StreamVersion ascending from fromVersion inclusive. It satisfies
+// eventstore.StreamReader. Unversioned events (plain Append path) are never
+// returned. Because the result is capped at limit, use
+// eventstore.ReadStreamAll to read a long stream in full.
 func (s *EventStore) ReadStream(ctx context.Context, streamID uuid.UUID, fromVersion, limit int) ([]eventstore.StoredEvent, error) {
 	if fromVersion < 0 {
 		fromVersion = 0
@@ -382,9 +335,7 @@ func (s *EventStore) ReadStream(ctx context.Context, streamID uuid.UUID, fromVer
 	return s.transformToStoredEvents(rows)
 }
 
-// CleanUpEvents removes a list of stored events from the event store based on their IncrementID values.
-// It constructs and executes an SQL DELETE statement to clean up the specified events.
-// Returns an error if there is an issue during SQL execution.
+// CleanUpEvents removes the given events from the store by their IncrementID.
 func (s *EventStore) CleanUpEvents(ctx context.Context, storedEvents []eventstore.StoredEvent) error {
 	if len(storedEvents) == 0 {
 		return nil
@@ -437,8 +388,7 @@ func (s *EventStore) HasUncommittedID(ctx context.Context, lowerBound, upperBoun
 	return hasUncommittedID, err
 }
 
-// transformToStoredEvents scans SQL query result rows and converts them into a slice of eventstore.StoredEvents.
-// Returns an error if row scanning, data parsing, or UUID unmarshalling fails.
+// transformToStoredEvents scans the query rows into eventstore.StoredEvents.
 func (s *EventStore) transformToStoredEvents(rows *sql.Rows) ([]eventstore.StoredEvent, error) {
 	var events []eventstore.StoredEvent
 	for rows.Next() {
@@ -457,10 +407,9 @@ func (s *EventStore) transformToStoredEvents(rows *sql.Rows) ([]eventstore.Store
 			return nil, err
 		}
 
-		// Values are written in UTC (see Append), so read them back in UTC
-		// to guarantee a timezone-stable round-trip. time.DateTime parses an
-		// optional fractional second even though the layout omits it, so both
-		// legacy DATETIME and DATETIME(6) values round-trip.
+		// Written in UTC (see Append); read back in UTC. time.DateTime accepts
+		// an optional fractional second, so both DATETIME and DATETIME(6)
+		// round-trip.
 		occurredOnTime, err := time.ParseInLocation(time.DateTime, occurredAt, time.UTC)
 		if err != nil {
 			return nil, err
@@ -501,9 +450,8 @@ func (s *EventStore) transformToStoredEvents(rows *sql.Rows) ([]eventstore.Store
 			Metadata:      metadata,
 		})
 	}
-	// rows.Next() returns false on both end-of-set and iteration errors
-	// (e.g. a connection drop mid-result); without this check a truncated
-	// result would be returned as a complete one.
+	// rows.Next() returns false on both end-of-set and error; check Err so a
+	// truncated result isn't mistaken for a complete one.
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}

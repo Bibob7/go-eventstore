@@ -7,28 +7,20 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// relayPersistTimeout bounds the detached write that records relay
-// progress (cursor advance or event cleanup) after a batch was
-// processed. It exists so a wedged database during shutdown cannot block
-// a relay indefinitely on that final write.
+// relayPersistTimeout bounds the detached write that records relay progress
+// during shutdown, so a wedged database cannot block a relay indefinitely.
 const relayPersistTimeout = 5 * time.Second
 
-// detachedPersistCtx derives a context for persisting relay progress that
-// is NOT cancelled when ctx is. A relay that already processed events
-// must still record that fact even when ctx was cancelled by a graceful
-// shutdown; reusing the cancelled ctx would make the database reject the
-// write, silently re-delivering the batch on restart. Parent values are
-// retained (so tracing/correlation survives) while the deadline is
-// replaced by relayPersistTimeout to bound the write.
+// detachedPersistCtx derives a context for persisting relay progress that is
+// NOT cancelled when ctx is: events already processed must be acknowledged even
+// when a graceful shutdown cancelled ctx, or the batch is re-delivered on
+// restart. Parent values are retained; the deadline is relayPersistTimeout.
 func detachedPersistCtx(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), relayPersistTimeout)
 }
 
-// relayConfig carries the knobs collected from RelayOption. It is shared
-// by every concrete relay type as an embedded field so the option
-// setters can write through a single struct. Each relay also holds a
-// single typed handler factory and a concrete strategy that closes over
-// that factory.
+// relayConfig carries the options collected from RelayOption. It is embedded by
+// every concrete relay type.
 type relayConfig struct {
 	batchSize             int
 	batchDelay            time.Duration
@@ -37,9 +29,8 @@ type relayConfig struct {
 	partitionStrategy     PartitionStrategy
 }
 
-// buildPlainHandler invokes the Handler factory for the given worker.
-// Returns nil when no factory is configured. Used by handlerBatchStrategy
-// for both the sequential path and per-worker factory invocation.
+// buildPlainHandler invokes the Handler factory for the given worker, or
+// returns nil when no factory is configured.
 func buildPlainHandler(factory func(WorkerContext) Handler, wc WorkerContext) Handler {
 	if factory == nil {
 		return nil
@@ -47,9 +38,8 @@ func buildPlainHandler(factory func(WorkerContext) Handler, wc WorkerContext) Ha
 	return factory(wc)
 }
 
-// buildBatchHandler invokes the BatchHandler factory for the given worker.
-// Returns nil when no factory is configured. Used by
-// batchHandlerBatchStrategy.
+// buildBatchHandler invokes the BatchHandler factory for the given worker, or
+// returns nil when no factory is configured.
 func buildBatchHandler(factory func(WorkerContext) BatchHandler, wc WorkerContext) BatchHandler {
 	if factory == nil {
 		return nil
@@ -57,25 +47,15 @@ func buildBatchHandler(factory func(WorkerContext) BatchHandler, wc WorkerContex
 	return factory(wc)
 }
 
-// runParallel partitions the batch into n per-worker buckets using partitioner
-// and runs one goroutine per non-empty worker via errgroup. Partitioning
-// up front (rather than streaming events into per-worker channels) keeps
-// each event on a stable worker for the lifetime of a Run, so any
-// per-event ordering invariant the partitioner enforces is preserved
-// within a worker. The runWorker closure is supplied by the concrete
-// relay type — it knows how to invoke the registered factories and the
-// per-event logic.
+// runParallel partitions the batch into n per-worker buckets and runs one
+// goroutine per non-empty worker via errgroup. Partitioning up front keeps each
+// event on a stable worker, preserving any per-worker ordering the partitioner
+// enforces. errgroup.Wait returns the first worker error and cancels the
+// derived context so siblings can bail out between events.
 //
-// errgroup gives us the worker pool's bookkeeping for free: Wait blocks until
-// every worker drains, returns the first error any worker produced, and its
-// derived context is cancelled on that first error so the remaining workers
-// can bail out between events.
-//
-// Strict in the parallel path: per-event partitioning means partial
-// per-worker progress can't be merged into a single cursor update without
-// risking lost events. Any error — a cancelled context or a handler/Commit
-// failure — discards the whole batch so the next Run retries it from the last
-// committed position.
+// The parallel path is strict: per-event partitioning means partial per-worker
+// progress can't be merged into one cursor update, so any error discards the
+// whole batch for the next Run to retry.
 func runParallel(
 	ctx context.Context,
 	batch []StoredEvent,
@@ -84,7 +64,6 @@ func runParallel(
 	runWorker func(ctx context.Context, wc WorkerContext, events []StoredEvent) error,
 ) (int64, []StoredEvent, error) {
 	// Nothing to process: return before indexing batch[len(batch)-1] below.
-	// Mirrors runSequential, which no-ops on an empty batch.
 	if len(batch) == 0 {
 		return 0, nil, nil
 	}
@@ -115,37 +94,26 @@ func runParallel(
 
 // --- batchStrategy ---------------------------------------------------
 
-// batchStrategy encapsulates how a batch of events is dispatched to
-// handlers. A relay holds a single strategy chosen at construction time
-// and is agnostic to which concrete implementation it runs:
-// handlerBatchStrategy (plain Handler) or batchHandlerBatchStrategy
-// (BatchHandler with a Commit barrier). Both execution paths live here so
-// the relay only has to choose between them based on the configured
-// parallelism.
+// batchStrategy encapsulates how a batch is dispatched to handlers. A relay
+// holds one strategy chosen at construction: handlerBatchStrategy (plain
+// Handler) or batchHandlerBatchStrategy (BatchHandler with a Commit barrier).
 type batchStrategy interface {
-	// validate reports whether the strategy is ready to run. It returns
-	// ErrNilFactory when the strategy was built with a nil handler factory,
-	// so a relay can surface the misconfiguration from Run instead of
-	// dereferencing nil mid-batch.
+	// validate returns ErrNilFactory when the strategy was built with a nil
+	// factory, so a relay can surface it from Run instead of panicking mid-batch.
 	validate() error
-	// runSequential processes the whole batch on a single goroutine,
-	// returning the last successfully processed IncrementID, the processed
-	// events, and the first error (if any). It honours ctx cancellation
-	// between events.
+	// runSequential processes the whole batch on one goroutine, returning the
+	// last processed IncrementID, the processed events, and the first error. It
+	// honours ctx cancellation between events.
 	runSequential(ctx context.Context, batch []StoredEvent) (int64, []StoredEvent, error)
-	// runWorker processes the events routed to worker wc.ID on a single
-	// goroutine. runParallel launches it once per non-empty worker. It
-	// honours ctx cancellation between events so a sibling worker's error
-	// stops it promptly, and reports any handler/Commit failure.
+	// runWorker processes the events routed to worker wc.ID on one goroutine;
+	// runParallel launches it once per non-empty worker.
 	runWorker(ctx context.Context, wc WorkerContext, events []StoredEvent) error
 }
 
 // --- handlerBatchStrategy --------------------------------------------
 
-// handlerBatchStrategy powers the plain-Handler relays: partial progress
-// in the sequential path, strict in the parallel path. The factory
-// produces a plain Handler; Commit is irrelevant here so the strategy
-// never calls it.
+// handlerBatchStrategy powers the plain-Handler relays: partial progress in the
+// sequential path, strict in the parallel path. Commit is irrelevant here.
 type handlerBatchStrategy struct {
 	factory func(WorkerContext) Handler
 }
@@ -164,13 +132,12 @@ func (s handlerBatchStrategy) runSequential(ctx context.Context, batch []StoredE
 		newLast   int64
 	)
 	for _, ev := range batch {
-		// Honour cancellation between events: report partial progress so the
-		// caller advances the cursor to the last successfully handled event.
+		// Honour cancellation; partial progress is reported so the caller can
+		// advance the cursor to the last successfully handled event.
 		if err := ctx.Err(); err != nil {
 			return newLast, processed, err
 		}
 		if err := handler.Handle(ctx, ev); err != nil {
-			// Partial progress: caller may advance cursor to newLast.
 			return newLast, processed, err
 		}
 		newLast = ev.IncrementID
@@ -182,8 +149,7 @@ func (s handlerBatchStrategy) runSequential(ctx context.Context, batch []StoredE
 func (s handlerBatchStrategy) runWorker(ctx context.Context, wc WorkerContext, events []StoredEvent) error {
 	handler := buildPlainHandler(s.factory, wc)
 	for _, ev := range events {
-		// Honour cancellation between events so a sibling worker's error
-		// (which errgroup turns into a ctx cancellation) stops us promptly.
+		// Honour cancellation so a sibling worker's error stops us promptly.
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -197,9 +163,8 @@ func (s handlerBatchStrategy) runWorker(ctx context.Context, wc WorkerContext, e
 // --- batchHandlerBatchStrategy ---------------------------------------
 
 // batchHandlerBatchStrategy powers the BatchHandler relays: strict
-// all-or-nothing on every path. Commit fires once per worker per batch
-// after every routed event has been Handled. Any error — Handle, Commit,
-// or cancellation — discards the partial progress.
+// all-or-nothing on every path. Commit fires once per worker after every routed
+// event was handled; any error discards the batch.
 type batchHandlerBatchStrategy struct {
 	factory func(WorkerContext) BatchHandler
 }
@@ -218,9 +183,8 @@ func (s batchHandlerBatchStrategy) runSequential(ctx context.Context, batch []St
 		newLast   int64
 	)
 	for _, ev := range batch {
-		// Honour cancellation between events. The Commit barrier has not
-		// fired yet, so the batch is not durably processed: discard it and
-		// let the next Run retry.
+		// The Commit barrier has not fired yet, so on cancellation the batch is
+		// not durably processed: discard it and let the next Run retry.
 		if err := ctx.Err(); err != nil {
 			return 0, nil, err
 		}
@@ -230,9 +194,8 @@ func (s batchHandlerBatchStrategy) runSequential(ctx context.Context, batch []St
 		newLast = ev.IncrementID
 		processed = append(processed, ev)
 	}
-	// Commit barrier: flushes per-batch work (e.g. AMQP publish) once
-	// after every event in the batch was handled. A Commit failure
-	// here means the barrier did not hold, so the batch is discarded.
+	// Commit barrier: flush per-batch work (e.g. AMQP publish) once after every
+	// event was handled. A failure here discards the batch.
 	if err := handler.Commit(ctx); err != nil {
 		return 0, nil, err
 	}
@@ -240,13 +203,10 @@ func (s batchHandlerBatchStrategy) runSequential(ctx context.Context, batch []St
 }
 
 func (s batchHandlerBatchStrategy) runWorker(ctx context.Context, wc WorkerContext, events []StoredEvent) error {
-	// runParallel never launches an empty worker, so there is always at
-	// least one event to handle and a Commit barrier to fire.
 	handler := buildBatchHandler(s.factory, wc)
 	for _, ev := range events {
-		// Honour cancellation between events. The Commit barrier has not
-		// fired yet, so the batch is not durably processed: discard it and
-		// let the next Run retry.
+		// The Commit barrier has not fired yet, so on cancellation the batch is
+		// not durably processed: discard it and let the next Run retry.
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -254,7 +214,7 @@ func (s batchHandlerBatchStrategy) runWorker(ctx context.Context, wc WorkerConte
 			return err
 		}
 	}
-	// Commit barrier: flushes per-batch work (e.g. AMQP publish) once after
-	// every routed event was handled. A Commit failure discards the batch.
+	// Commit barrier: flush per-batch work once after every routed event was
+	// handled. A failure discards the batch.
 	return handler.Commit(ctx)
 }

@@ -7,42 +7,21 @@ import (
 )
 
 // Metadata is an optional set of key/value pairs attached to an event for
-// cross-cutting concerns (correlation IDs, causation chains, tracing, tenancy,
-// user identity, etc.). The map is intentionally map[string]string to keep the
-// wire format simple and to prevent schema drift across event types.
-//
-// Reserved keys (by convention, not enforced by the store):
-//
-//   - MetadataKeyCorrelationID: links all events triggered by a single
-//     incoming request or command, propagated across service boundaries.
-//   - MetadataKeyCausationID:   the ID of the event that *caused* this event,
-//     i.e. the last event in the chain this one reacts to. Forms a linked
-//     list of cause-and-effect when paired with the correlation ID.
-//   - MetadataKeyTraceID:       OTel/distributed-tracing trace ID, for log
-//     correlation.
-//
-// Stores MUST treat a nil Metadata and an empty Metadata as equivalent.
+// cross-cutting concerns (correlation IDs, causation chains, tracing). Stores
+// treat a nil and an empty Metadata as equivalent.
 type Metadata map[string]string
 
-// Standard reserved keys for cross-cutting metadata. They are not enforced —
-// the store persists any keys the producer provides — but consumers are
-// encouraged to interpret these names in the conventional way.
+// Reserved metadata keys for cross-cutting concerns. They are conventions only;
+// the store persists whatever keys the producer provides.
 const (
 	MetadataKeyCorrelationID = "correlation_id"
 	MetadataKeyCausationID   = "causation_id"
 	MetadataKeyTraceID       = "trace_id"
 )
 
-// DomainEvent represents an event that occurred in the domain.
-// Implementations carry all data needed to describe what happened
-// and are passed to Store.Append to persist the event.
-//
-// Note: a DomainEvent does NOT carry a per-stream version. The version
-// is assigned by the store on append — either implicitly (Store.Append
-// treats the event log as an append-only feed) or against an expected
-// version supplied to StreamStore.AppendWithExpectedVersion. Aggregates
-// that need to know their position on reload get it from the last
-// StoredEvent.StreamVersion they replayed.
+// DomainEvent represents an event that occurred in the domain. Implementations
+// are passed to Store.Append to be persisted. A DomainEvent carries no stream
+// version of its own; the store assigns one on append.
 type DomainEvent interface {
 	// ID returns the unique identifier of this event.
 	ID() uuid.UUID
@@ -54,15 +33,11 @@ type DomainEvent interface {
 	OccurredAt() time.Time
 }
 
-// MetadataProvider is an optional interface that DomainEvent implementations
-// can satisfy to attach cross-cutting metadata to an event. The store checks
-// for this interface at append time via a type assertion; events that do not
-// implement it are persisted with nil metadata. This keeps the core
-// DomainEvent interface stable across library versions.
+// MetadataProvider is an optional interface a DomainEvent can implement to
+// attach cross-cutting metadata. Events that do not implement it are persisted
+// with nil metadata.
 type MetadataProvider interface {
-	// Metadata returns optional cross-cutting metadata for this event.
-	// Implementations should return nil when no metadata is attached; stores
-	// MUST treat nil and an empty map as equivalent.
+	// Metadata returns the event's metadata, or nil when none is attached.
 	Metadata() Metadata
 }
 
@@ -85,11 +60,8 @@ type StoredEvent struct {
 	// Metadata carries the cross-cutting metadata persisted alongside the event.
 	// It is nil for events that did not have metadata when they were appended.
 	Metadata Metadata
-	// StreamVersion is the per-stream position this event occupies, assigned
-	// by StreamStore.AppendWithExpectedVersion: for each stream it equals the
-	// previously-stored StreamVersion + 1, or 0 for the first event of a
-	// fresh stream. Events written via the plain Store.Append path carry no
-	// version; they are delivered with StreamVersion == -1 (the same
-	// "unversioned" sentinel used by StreamVersionReader.LatestStreamVersion).
+	// StreamVersion is the per-stream position assigned by
+	// StreamStore.AppendWithExpectedVersion. Events written via the plain
+	// Store.Append path are unversioned and delivered with StreamVersion == -1.
 	StreamVersion int
 }

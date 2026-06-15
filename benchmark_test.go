@@ -248,11 +248,11 @@ func BenchmarkTransientRelay(b *testing.B) {
 						store.nextID++
 						uid, _ := uuid.NewV4()
 						store.events = append(store.events, StoredEvent{
-							IncrementID: store.nextID,
-							ID:          uid,
-							StreamID:    uid,
-							EventType:   "bench-event",
-							Payload:     `{"bench":true}`,
+							IncrementID:   store.nextID,
+							ID:            uid,
+							StreamID:      uid,
+							EventType:     "bench-event",
+							Payload:       `{"bench":true}`,
 							OccurredAt:    time.Now(),
 							StreamVersion: -1,
 						})

@@ -8,31 +8,19 @@ import (
 )
 
 // ErrStreamVersionConflict is returned by StreamStore.AppendWithExpectedVersion
-// when the stream's current head does not match the caller's expectedVersion,
-// or when a concurrent writer wins the race for the same stream version.
-// event can be inspected by unwrapping the error:
-//
-//	var c *eventstore.StreamVersionConflictError
-//	if errors.As(err, &c) {
-//	    log.Printf("conflict on stream %s, event %s", c.StreamID, c.EventID)
-//	}
-//
-// Concurrent aggregates can use this signal to reload and retry from the
-// freshly observed stream state.
+// when the stream's head does not match the caller's expectedVersion, or a
+// concurrent writer wins the race. Unwrap it to a *StreamVersionConflictError
+// for the conflicting stream and event; callers should reload and retry.
 var ErrStreamVersionConflict = errors.New("event store: stream version conflict")
 
 // ErrInvalidStreamAppend is returned by StreamStore.AppendWithExpectedVersion
-// when the call itself is malformed: an event in the batch belongs to a
-// different stream than the streamID parameter, or expectedVersion is below
-// the -1 sentinel. These are programming errors, not concurrency conflicts —
-// reloading and retrying (the correct reaction to ErrStreamVersionConflict)
-// cannot fix them, so they are reported as a distinct sentinel that retry
-// loops must not catch.
+// when the call is malformed: an event belongs to a different stream, or
+// expectedVersion is below -1. These are programming errors, reported as a
+// distinct sentinel so retry loops do not catch them.
 var ErrInvalidStreamAppend = errors.New("event store: invalid stream append")
 
-// StreamVersionConflictError provides the concrete stream/event that
-// triggered an ErrStreamVersionConflict. The sentinel is the
-// `errors.Is`-friendly value; this struct carries the diagnostics.
+// StreamVersionConflictError carries the stream and event that triggered an
+// ErrStreamVersionConflict, which it wraps.
 type StreamVersionConflictError struct {
 	// StreamID is the stream the conflicting event belongs to.
 	StreamID uuid.UUID
@@ -44,7 +32,6 @@ type StreamVersionConflictError struct {
 	Got int
 }
 
-// Error implements the error interface.
 func (e *StreamVersionConflictError) Error() string {
 	return "event store: stream " + e.StreamID.String() +
 		": event " + e.EventID.String() + " has version " +

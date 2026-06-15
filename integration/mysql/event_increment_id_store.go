@@ -27,11 +27,10 @@ func NewEventIncrementIDStore(db *sql.DB, tableName string) *EventIncrementIDSto
 
 func (s *EventIncrementIDStore) SetIncrementID(ctx context.Context, relayName string, expectedPreviousID int64, incrementID int64) error {
 	return WithTransaction(ctx, s.db, func(tx *sql.Tx) error {
-		// Ensure the row exists before locking it. A SELECT ... FOR UPDATE on a
-		// missing row takes a gap lock, which causes deadlocks when several
-		// relays write their (distinct) cursors concurrently against an empty
-		// table. A plain upsert of distinct keys only takes insert-intention
-		// locks, so the subsequent FOR UPDATE locks an existing record instead.
+		// Ensure the row exists before the FOR UPDATE below: a FOR UPDATE on a
+		// missing row takes a gap lock that deadlocks when several relays insert
+		// distinct cursors concurrently. The upsert takes only insert-intention
+		// locks, so the FOR UPDATE then locks an existing row.
 		// #nosec G201
 		ensureStmt := fmt.Sprintf("INSERT INTO %s (relay_name, increment_id) VALUES (?, 0) ON DUPLICATE KEY UPDATE relay_name = relay_name", s.tableName)
 		if _, err := tx.ExecContext(ctx, ensureStmt, relayName); err != nil {

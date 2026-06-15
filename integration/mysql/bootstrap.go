@@ -4,13 +4,13 @@ import (
 	"database/sql"
 )
 
-// EventStoreBundle groups the event store and increment ID store together for convenience.
+// EventStoreBundle groups the event store and increment ID store for convenience.
 type EventStoreBundle struct {
 	EventStore       *EventStore
 	IncrementIDStore *EventIncrementIDStore
 }
 
-// NewEventStoreBundle initializes a new EventStoreBundle with the given database connection and configuration.
+// NewEventStoreBundle builds an EventStoreBundle from db and cfg.
 func NewEventStoreBundle(db *sql.DB, cfg Config) *EventStoreBundle {
 	return &EventStoreBundle{
 		EventStore:       NewEventStore(db, cfg.EventStoreTableName),
