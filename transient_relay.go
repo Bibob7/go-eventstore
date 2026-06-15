@@ -83,10 +83,14 @@ func (t *transientRelay) Run(ctx context.Context) (err error) {
 		if len(processed) == 0 {
 			return
 		}
-		// Clean up on a detached context (see detachedPersistCtx) so a cancelled
-		// ctx still removes the already-handled events.
-		cleanupCtx, cancel := detachedPersistCtx(ctx)
-		defer cancel()
+		// Detach only on shutdown (ctx already cancelled) so the cleanup still
+		// goes through; see detachedPersistCtx.
+		cleanupCtx := ctx
+		if ctx.Err() != nil {
+			var cancel context.CancelFunc
+			cleanupCtx, cancel = detachedPersistCtx(ctx)
+			defer cancel()
+		}
 		if cleanUpErr := t.store.CleanUpEvents(cleanupCtx, processed); cleanUpErr != nil && err == nil {
 			err = fmt.Errorf("failed to clean up events: %w", cleanUpErr)
 		}

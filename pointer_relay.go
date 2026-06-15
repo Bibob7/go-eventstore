@@ -118,10 +118,14 @@ func (p *pointerRelay) Run(ctx context.Context) (err error) {
 			slog.Debug("No events relayed", "name", p.name, "last_increment_id", lastIncrementID)
 			return
 		}
-		// Persist the cursor on a detached context (see detachedPersistCtx) so a
-		// cancelled ctx still acknowledges the already-processed events.
-		persistCtx, cancel := detachedPersistCtx(ctx)
-		defer cancel()
+		// Detach only on shutdown (ctx already cancelled) so the cursor write
+		// still goes through; see detachedPersistCtx.
+		persistCtx := ctx
+		if ctx.Err() != nil {
+			var cancel context.CancelFunc
+			persistCtx, cancel = detachedPersistCtx(ctx)
+			defer cancel()
+		}
 		if setErr := p.incrementIDStore.SetIncrementID(persistCtx, p.name, lastIncrementID, newLastIncrementID); setErr != nil && err == nil {
 			err = fmt.Errorf("failed to set new increment id: %w", setErr)
 		}
